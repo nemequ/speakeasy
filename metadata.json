@@ -1,0 +1,9 @@
+{
+  "uuid": "speakeasy@speakeasy.local",
+  "name": "Speakeasy",
+  "description": "Push-to-talk dictation with AI text cleanup. Hold a key to record, release to transcribe and paste via clipboard.",
+  "shell-version": ["49"],
+  "version": 1,
+  "url": "",
+  "settings-schema": "org.gnome.shell.extensions.speakeasy"
+}

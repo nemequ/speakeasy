@@ -1,0 +1,624 @@
+// SPDX-License-Identifier: MIT
+// Speakeasy — Extension preferences UI
+
+import Adw from 'gi://Adw';
+import Gtk from 'gi://Gtk';
+import Gio from 'gi://Gio';
+
+import {
+    ExtensionPreferences,
+    gettext as _,
+} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+
+export default class SpeakeasyPreferences extends ExtensionPreferences {
+    fillPreferencesWindow(window) {
+        const settings = this.getSettings();
+        // Keep a reference so GSettings bindings aren't GC'd
+        window._speakeasySettings = settings;
+
+        window.add(this._buildGeneralPage(settings));
+        window.add(this._buildSttPage(settings));
+        window.add(this._buildAiPage(settings));
+        window.add(this._buildTimingPage(settings));
+        window.add(this._buildDeveloperPage(settings));
+    }
+
+    // ─── General page ────────────────────────────────────────────────
+
+    _buildGeneralPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('General'),
+            icon_name: 'preferences-system-symbolic',
+        });
+
+        // ── Keybinding group ──
+        const keybindGroup = new Adw.PreferencesGroup({
+            title: _('Keybinding'),
+            description: _('Configure the push-to-talk trigger key.'),
+        });
+        page.add(keybindGroup);
+
+        const accelRow = new Adw.ActionRow({
+            title: _('Trigger Key'),
+            subtitle: settings.get_string('trigger-accel'),
+        });
+
+        const accelButton = new Gtk.Button({
+            label: _('Set Key'),
+            valign: Gtk.Align.CENTER,
+        });
+        accelButton.connect('clicked', () => {
+            this._showAccelDialog(accelRow, settings, accelButton);
+        });
+        accelRow.add_suffix(accelButton);
+        keybindGroup.add(accelRow);
+
+        settings.connect('changed::trigger-accel', () => {
+            accelRow.subtitle = settings.get_string('trigger-accel');
+        });
+
+        // ── History group ──
+        const historyGroup = new Adw.PreferencesGroup({
+            title: _('History'),
+        });
+        page.add(historyGroup);
+
+        const maxTranscriptsRow = new Adw.SpinRow({
+            title: _('Max Transcript History'),
+            subtitle: _('Maximum number of transcripts to keep.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 10,
+                upper: 1000,
+                step_increment: 10,
+                page_increment: 50,
+                value: settings.get_uint('max-transcripts'),
+            }),
+        });
+        settings.bind('max-transcripts', maxTranscriptsRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        historyGroup.add(maxTranscriptsRow);
+
+        return page;
+    }
+
+    // ─── STT page ────────────────────────────────────────────────────
+
+    _buildSttPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Speech Recognition'),
+            icon_name: 'audio-input-microphone-symbolic',
+        });
+
+        // ── Backend group ──
+        const backendGroup = new Adw.PreferencesGroup({
+            title: _('STT Backend'),
+            description: _('Choose the speech recognition engine.'),
+        });
+        page.add(backendGroup);
+
+        const backendRow = new Adw.ComboRow({
+            title: _('Backend'),
+            subtitle: _('Whisper requires GStreamer 1.28.1+'),
+            model: Gtk.StringList.new(['vosk', 'whisper']),
+        });
+        // Sync combo to setting
+        const currentBackend = settings.get_string('stt-backend');
+        backendRow.selected = currentBackend === 'whisper' ? 1 : 0;
+        backendRow.connect('notify::selected', () => {
+            const backends = ['vosk', 'whisper'];
+            settings.set_string('stt-backend', backends[backendRow.selected]);
+        });
+        settings.connect('changed::stt-backend', () => {
+            const val = settings.get_string('stt-backend');
+            backendRow.selected = val === 'whisper' ? 1 : 0;
+        });
+        backendGroup.add(backendRow);
+
+        // ── VOSK group ──
+        const voskGroup = new Adw.PreferencesGroup({
+            title: _('VOSK'),
+            description: _('Settings for the VOSK speech recognition backend.'),
+        });
+        page.add(voskGroup);
+
+        const voskPathRow = new Adw.EntryRow({
+            title: _('Model Path'),
+            show_apply_button: true,
+            text: settings.get_string('vosk-model-path'),
+        });
+        voskPathRow.connect('apply', () => {
+            settings.set_string('vosk-model-path', voskPathRow.text);
+        });
+        settings.connect('changed::vosk-model-path', () => {
+            voskPathRow.text = settings.get_string('vosk-model-path');
+        });
+
+        const voskBrowseButton = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for VOSK model directory'),
+        });
+        voskBrowseButton.connect('clicked', () => {
+            this._browseFolder(voskPathRow, settings, 'vosk-model-path');
+        });
+        voskPathRow.add_suffix(voskBrowseButton);
+        voskGroup.add(voskPathRow);
+
+        const voskHint = new Adw.ActionRow({
+            title: _('Leave empty to auto-detect from ~/.cache/vosk'),
+            css_classes: ['dim-label'],
+        });
+        voskGroup.add(voskHint);
+
+        // ── Whisper group ──
+        const whisperGroup = new Adw.PreferencesGroup({
+            title: _('Whisper'),
+            description: _('Settings for the Whisper speech recognition backend.'),
+        });
+        page.add(whisperGroup);
+
+        const whisperPathRow = new Adw.EntryRow({
+            title: _('Model Path'),
+            show_apply_button: true,
+            text: settings.get_string('whisper-model-path'),
+        });
+        whisperPathRow.connect('apply', () => {
+            settings.set_string('whisper-model-path', whisperPathRow.text);
+        });
+        settings.connect('changed::whisper-model-path', () => {
+            whisperPathRow.text = settings.get_string('whisper-model-path');
+        });
+
+        const whisperBrowseButton = new Gtk.Button({
+            icon_name: 'document-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for Whisper model file'),
+        });
+        whisperBrowseButton.connect('clicked', () => {
+            this._browseFile(whisperPathRow, settings, 'whisper-model-path');
+        });
+        whisperPathRow.add_suffix(whisperBrowseButton);
+        whisperGroup.add(whisperPathRow);
+
+        const whisperLangRow = new Adw.EntryRow({
+            title: _('Language'),
+            show_apply_button: true,
+            text: settings.get_string('whisper-language'),
+        });
+        whisperLangRow.connect('apply', () => {
+            settings.set_string('whisper-language', whisperLangRow.text);
+        });
+        settings.connect('changed::whisper-language', () => {
+            whisperLangRow.text = settings.get_string('whisper-language');
+        });
+        whisperGroup.add(whisperLangRow);
+
+        return page;
+    }
+
+    // ─── AI page ─────────────────────────────────────────────────────
+
+    _buildAiPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('AI Cleanup'),
+            icon_name: 'starred-symbolic',
+        });
+
+        // ── Backend selection ──
+        const backendGroup = new Adw.PreferencesGroup({
+            title: _('AI Backend'),
+            description: _('Clean up raw speech recognition output with AI.'),
+        });
+        page.add(backendGroup);
+
+        const enabledRow = new Adw.SwitchRow({
+            title: _('Enable AI Cleanup'),
+            subtitle: _('Send STT output through AI for cleanup before typing.'),
+        });
+        settings.bind('ai-enabled', enabledRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        backendGroup.add(enabledRow);
+
+        const backendRow = new Adw.ComboRow({
+            title: _('Backend'),
+            model: Gtk.StringList.new(['Anthropic (Cloud)', 'Ollama (Local)']),
+        });
+        const currentBackend = settings.get_string('ai-backend');
+        backendRow.selected = currentBackend === 'ollama' ? 1 : 0;
+        backendRow.connect('notify::selected', () => {
+            const backends = ['anthropic', 'ollama'];
+            settings.set_string('ai-backend', backends[backendRow.selected]);
+        });
+        settings.connect('changed::ai-backend', () => {
+            const val = settings.get_string('ai-backend');
+            backendRow.selected = val === 'ollama' ? 1 : 0;
+        });
+        backendGroup.add(backendRow);
+
+        // ── Anthropic settings ──
+        const anthropicGroup = new Adw.PreferencesGroup({
+            title: _('Anthropic Claude'),
+            description: _('Cloud-based cleanup via the Anthropic API.'),
+        });
+        page.add(anthropicGroup);
+
+        const apiKeyRow = new Adw.PasswordEntryRow({
+            title: _('API Key'),
+            show_apply_button: true,
+            text: settings.get_string('anthropic-api-key'),
+        });
+        apiKeyRow.connect('apply', () => {
+            settings.set_string('anthropic-api-key', apiKeyRow.text);
+        });
+        settings.connect('changed::anthropic-api-key', () => {
+            apiKeyRow.text = settings.get_string('anthropic-api-key');
+        });
+        anthropicGroup.add(apiKeyRow);
+
+        const anthropicModelRow = new Adw.EntryRow({
+            title: _('Model'),
+            show_apply_button: true,
+            text: settings.get_string('anthropic-model'),
+        });
+        anthropicModelRow.connect('apply', () => {
+            settings.set_string('anthropic-model', anthropicModelRow.text);
+        });
+        settings.connect('changed::anthropic-model', () => {
+            anthropicModelRow.text = settings.get_string('anthropic-model');
+        });
+        anthropicGroup.add(anthropicModelRow);
+
+        // ── Ollama settings ──
+        const ollamaGroup = new Adw.PreferencesGroup({
+            title: _('Ollama'),
+            description: _('Local cleanup via an Ollama server. No API key needed.'),
+        });
+        page.add(ollamaGroup);
+
+        const ollamaUrlRow = new Adw.EntryRow({
+            title: _('Server URL'),
+            show_apply_button: true,
+            text: settings.get_string('ollama-url'),
+        });
+        ollamaUrlRow.connect('apply', () => {
+            settings.set_string('ollama-url', ollamaUrlRow.text);
+        });
+        settings.connect('changed::ollama-url', () => {
+            ollamaUrlRow.text = settings.get_string('ollama-url');
+        });
+        ollamaGroup.add(ollamaUrlRow);
+
+        const ollamaModelRow = new Adw.EntryRow({
+            title: _('Model'),
+            show_apply_button: true,
+            text: settings.get_string('ollama-model'),
+        });
+        ollamaModelRow.connect('apply', () => {
+            settings.set_string('ollama-model', ollamaModelRow.text);
+        });
+        settings.connect('changed::ollama-model', () => {
+            ollamaModelRow.text = settings.get_string('ollama-model');
+        });
+        ollamaGroup.add(ollamaModelRow);
+
+        const ollamaHint = new Adw.ActionRow({
+            title: _('Pull a model first: ollama pull qwen2.5:3b'),
+            css_classes: ['dim-label'],
+        });
+        ollamaGroup.add(ollamaHint);
+
+        // Show/hide backend-specific groups
+        const updateVisibility = () => {
+            const isOllama = settings.get_string('ai-backend') === 'ollama';
+            anthropicGroup.visible = !isOllama;
+            ollamaGroup.visible = isOllama;
+        };
+        settings.connect('changed::ai-backend', updateVisibility);
+        updateVisibility();
+
+        return page;
+    }
+
+    // ─── Timing page (Advanced) ──────────────────────────────────────
+
+    _buildTimingPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Advanced'),
+            icon_name: 'preferences-other-symbolic',
+        });
+
+        const timingGroup = new Adw.PreferencesGroup({
+            title: _('Keybinding Timing'),
+            description: _('Fine-tune hold-to-talk and double-tap detection. ' +
+                'These values depend on your keyboard repeat rate and delay.'),
+        });
+        page.add(timingGroup);
+
+        // release-gap-ms
+        const releaseGapRow = new Adw.SpinRow({
+            title: _('Release Gap (ms)'),
+            subtitle: _('Time with no key events before key is considered released. Must exceed keyboard repeat delay.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 300, upper: 2000, step_increment: 50, page_increment: 100,
+                value: settings.get_uint('release-gap-ms'),
+            }),
+        });
+        settings.bind('release-gap-ms', releaseGapRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        timingGroup.add(releaseGapRow);
+
+        // inter-tap-gap-ms
+        const interTapRow = new Adw.SpinRow({
+            title: _('Inter-Tap Gap Min (ms)'),
+            subtitle: _('Minimum gap between events to detect release-and-repress.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 30, upper: 200, step_increment: 5, page_increment: 20,
+                value: settings.get_uint('inter-tap-gap-ms'),
+            }),
+        });
+        settings.bind('inter-tap-gap-ms', interTapRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        timingGroup.add(interTapRow);
+
+        // repeat-delay-ms
+        const repeatDelayRow = new Adw.SpinRow({
+            title: _('Repeat Delay Threshold (ms)'),
+            subtitle: _('Gaps longer than this are keyboard repeat delay, not inter-tap.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 200, upper: 800, step_increment: 25, page_increment: 50,
+                value: settings.get_uint('repeat-delay-ms'),
+            }),
+        });
+        settings.bind('repeat-delay-ms', repeatDelayRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        timingGroup.add(repeatDelayRow);
+
+        // double-tap-window-ms
+        const doubleTapRow = new Adw.SpinRow({
+            title: _('Double-Tap Window (ms)'),
+            subtitle: _('Time to wait for a second tap before discarding.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 200, upper: 1000, step_increment: 50, page_increment: 100,
+                value: settings.get_uint('double-tap-window-ms'),
+            }),
+        });
+        settings.bind('double-tap-window-ms', doubleTapRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        timingGroup.add(doubleTapRow);
+
+        // hold-threshold
+        const holdThresholdRow = new Adw.SpinRow({
+            title: _('Hold Threshold (events)'),
+            subtitle: _('Minimum key-repeat events to consider a hold vs. tap.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 2, upper: 20, step_increment: 1, page_increment: 5,
+                value: settings.get_uint('hold-threshold'),
+            }),
+        });
+        settings.bind('hold-threshold', holdThresholdRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        timingGroup.add(holdThresholdRow);
+
+        return page;
+    }
+
+    // ─── Developer page ────────────────────────────────────────────
+
+    _buildDeveloperPage(settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Developer'),
+            icon_name: 'applications-engineering-symbolic',
+        });
+
+        // ── Developer mode group ──
+        const devGroup = new Adw.PreferencesGroup({
+            title: _('Developer Mode'),
+            description: _('Save transcripts and audio files for QA and debugging.'),
+        });
+        page.add(devGroup);
+
+        const devModeRow = new Adw.SwitchRow({
+            title: _('Enable Developer Mode'),
+            subtitle: _('Keep audio after transcription and save transcript JSON files to disk.'),
+        });
+        settings.bind('developer-mode', devModeRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        devGroup.add(devModeRow);
+
+        // Transcript directory
+        const transcriptDirRow = new Adw.EntryRow({
+            title: _('Transcript Directory'),
+            show_apply_button: true,
+            text: settings.get_string('transcript-dir'),
+        });
+        transcriptDirRow.connect('apply', () => {
+            settings.set_string('transcript-dir', transcriptDirRow.text);
+        });
+        settings.connect('changed::transcript-dir', () => {
+            transcriptDirRow.text = settings.get_string('transcript-dir');
+        });
+
+        const transcriptBrowseButton = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for transcript directory'),
+        });
+        transcriptBrowseButton.connect('clicked', () => {
+            this._browseFolder(transcriptDirRow, settings, 'transcript-dir');
+        });
+        transcriptDirRow.add_suffix(transcriptBrowseButton);
+        devGroup.add(transcriptDirRow);
+
+        const transcriptHint = new Adw.ActionRow({
+            title: _('Leave empty for ~/.local/share/speakeasy/transcripts'),
+            css_classes: ['dim-label'],
+        });
+        devGroup.add(transcriptHint);
+
+        // ── Prompt files group ──
+        const promptGroup = new Adw.PreferencesGroup({
+            title: _('Prompt Files'),
+            description: _('Override AI prompts with external text files. ' +
+                'Re-read at the start of each recording session — ' +
+                'no restart needed.'),
+        });
+        page.add(promptGroup);
+
+        // System prompt path
+        const systemPromptRow = new Adw.EntryRow({
+            title: _('System Prompt File'),
+            show_apply_button: true,
+            text: settings.get_string('system-prompt-path'),
+        });
+        systemPromptRow.connect('apply', () => {
+            settings.set_string('system-prompt-path', systemPromptRow.text);
+        });
+        settings.connect('changed::system-prompt-path', () => {
+            systemPromptRow.text = settings.get_string('system-prompt-path');
+        });
+
+        const systemBrowseButton = new Gtk.Button({
+            icon_name: 'document-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for system prompt file'),
+        });
+        systemBrowseButton.connect('clicked', () => {
+            this._browseFile(systemPromptRow, settings, 'system-prompt-path');
+        });
+        systemPromptRow.add_suffix(systemBrowseButton);
+        promptGroup.add(systemPromptRow);
+
+        const systemHint = new Adw.ActionRow({
+            title: _('Leave empty to use the bundled default prompt'),
+            css_classes: ['dim-label'],
+        });
+        promptGroup.add(systemHint);
+
+        // Framing prompt path
+        const framingPromptRow = new Adw.EntryRow({
+            title: _('Framing Prompt File'),
+            show_apply_button: true,
+            text: settings.get_string('framing-prompt-path'),
+        });
+        framingPromptRow.connect('apply', () => {
+            settings.set_string('framing-prompt-path', framingPromptRow.text);
+        });
+        settings.connect('changed::framing-prompt-path', () => {
+            framingPromptRow.text = settings.get_string('framing-prompt-path');
+        });
+
+        const framingBrowseButton = new Gtk.Button({
+            icon_name: 'document-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for framing prompt file'),
+        });
+        framingBrowseButton.connect('clicked', () => {
+            this._browseFile(framingPromptRow, settings, 'framing-prompt-path');
+        });
+        framingPromptRow.add_suffix(framingBrowseButton);
+        promptGroup.add(framingPromptRow);
+
+        const framingHint = new Adw.ActionRow({
+            title: _('Use {{UUID}} placeholder. Leave empty for default.'),
+            css_classes: ['dim-label'],
+        });
+        promptGroup.add(framingHint);
+
+        return page;
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────
+
+    /**
+     * Show a dialog to capture an accelerator keypress.
+     */
+    _showAccelDialog(row, settings, button) {
+        const window = button.get_root();
+
+        const dialog = new Adw.AlertDialog({
+            heading: _('Press a Key'),
+            body: _('Press the key you want to use as the push-to-talk trigger.\n' +
+                    'Modifier-only keys (Ctrl, Alt, Super) are not supported.'),
+        });
+        dialog.add_response('cancel', _('Cancel'));
+
+        const keyController = new Gtk.EventControllerKey();
+        let captured = false;
+        keyController.connect('key-pressed', (_ctrl, keyval, _keycode, state) => {
+            if (captured)
+                return;
+
+            // Ignore pure modifier presses
+            const isModifier =
+                keyval === 0xffe1 || keyval === 0xffe2 ||  // Shift
+                keyval === 0xffe3 || keyval === 0xffe4 ||  // Ctrl
+                keyval === 0xffe7 || keyval === 0xffe8 ||  // Meta
+                keyval === 0xffe9 || keyval === 0xffea ||  // Alt
+                keyval === 0xffeb || keyval === 0xffec;    // Super
+            if (isModifier)
+                return;
+
+            captured = true;
+            const cleanState = state & Gtk.accelerator_get_default_mod_mask();
+            const accel = Gtk.accelerator_name(keyval, cleanState);
+
+            if (accel) {
+                settings.set_string('trigger-accel', accel);
+                log(`Speakeasy prefs: trigger key set to "${accel}"`);
+            }
+
+            dialog.force_close();
+        });
+
+        // Adw.AlertDialog is a widget — add the key controller directly
+        dialog.add_controller(keyController);
+
+        dialog.choose(window, null, null);
+    }
+
+    /**
+     * Browse for a folder and set the result in settings.
+     */
+    _browseFolder(row, settings, key) {
+        const window = row.get_root();
+        const dialog = new Gtk.FileDialog({
+            title: _('Select Model Directory'),
+        });
+        dialog.select_folder(window, null, (source, result) => {
+            try {
+                const folder = source.select_folder_finish(result);
+                if (folder) {
+                    const path = folder.get_path();
+                    settings.set_string(key, path);
+                    row.text = path;
+                }
+            } catch (e) {
+                if (!e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                    log(`Speakeasy prefs: folder browse error: ${e.message}`);
+            }
+        });
+    }
+
+    /**
+     * Browse for a file and set the result in settings.
+     */
+    _browseFile(row, settings, key) {
+        const window = row.get_root();
+        const dialog = new Gtk.FileDialog({
+            title: _('Select Model File'),
+        });
+        dialog.open(window, null, (source, result) => {
+            try {
+                const file = source.open_finish(result);
+                if (file) {
+                    const path = file.get_path();
+                    settings.set_string(key, path);
+                    row.text = path;
+                }
+            } catch (e) {
+                if (!e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                    log(`Speakeasy prefs: file browse error: ${e.message}`);
+            }
+        });
+    }
+}

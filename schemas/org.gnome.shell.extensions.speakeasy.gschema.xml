@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.speakeasy"
+          path="/org/gnome/shell/extensions/speakeasy/">
+
+    <!-- Trigger key: accelerator string for grab_accelerator.
+         Must be a non-modifier key (Pause, Scroll_Lock, F13, etc.)
+         or a combo like <Ctrl><Shift>d.
+         Modifier-only keys do NOT work. -->
+    <key name="trigger-accel" type="s">
+      <default>'Pause'</default>
+      <summary>Push-to-talk trigger key</summary>
+      <description>
+        Accelerator string for the push-to-talk trigger key.
+        Default is the Pause key. Examples: 'Pause', 'Scroll_Lock',
+        'F13', '&lt;Ctrl&gt;&lt;Shift&gt;d'.
+        Modifier-only keys (Control_R, etc.) are NOT supported.
+      </description>
+    </key>
+
+    <!-- ============================================================
+         Keybinding timing parameters
+         ============================================================ -->
+
+    <!-- Time (ms) with no key events before we consider the key released.
+         Must be longer than the keyboard repeat delay (~500ms). -->
+    <key name="release-gap-ms" type="u">
+      <default>700</default>
+      <summary>Release gap timeout (ms)</summary>
+      <description>
+        Time in milliseconds with no key-repeat events before the key
+        is considered released. Must be longer than your keyboard's
+        repeat delay (typically 250-600ms). Default: 700.
+      </description>
+    </key>
+
+    <!-- Minimum gap (ms) between events to detect an inter-tap
+         (release + quick repress within a held stream). -->
+    <key name="inter-tap-gap-ms" type="u">
+      <default>60</default>
+      <summary>Inter-tap gap minimum (ms)</summary>
+      <description>
+        Minimum gap in milliseconds between key-repeat events to
+        detect a release-and-repress (inter-tap). Key repeats fire
+        every ~30ms, so gaps larger than this indicate the key was
+        released and pressed again. Default: 60.
+      </description>
+    </key>
+
+    <!-- Upper bound (ms) on inter-tap gap detection to distinguish
+         from the keyboard repeat delay. -->
+    <key name="repeat-delay-ms" type="u">
+      <default>400</default>
+      <summary>Keyboard repeat delay threshold (ms)</summary>
+      <description>
+        Upper bound in milliseconds for inter-tap gap detection.
+        Gaps longer than this are the keyboard repeat delay (key
+        still held), not an inter-tap. Must be shorter than
+        release-gap-ms. Default: 400.
+      </description>
+    </key>
+
+    <!-- Time (ms) to wait for a second tap before discarding. -->
+    <key name="double-tap-window-ms" type="u">
+      <default>500</default>
+      <summary>Double-tap window (ms)</summary>
+      <description>
+        After a quick tap, wait this many milliseconds for a second
+        tap before discarding the recording. Default: 500.
+      </description>
+    </key>
+
+    <!-- Minimum repeat events to count as a hold vs tap. -->
+    <key name="hold-threshold" type="u">
+      <default>5</default>
+      <summary>Hold threshold (event count)</summary>
+      <description>
+        Minimum number of key-repeat events to consider a keypress
+        a "hold" (hold-to-talk) rather than a "tap" (double-tap-to-lock).
+        Quick taps produce 1-3 events; holds produce many more. Default: 5.
+      </description>
+    </key>
+
+    <!-- ============================================================
+         STT backend
+         ============================================================ -->
+
+    <key name="stt-backend" type="s">
+      <default>'vosk'</default>
+      <summary>Speech-to-text backend</summary>
+      <description>
+        Which speech recognition engine to use.
+        'vosk' — gst-vosk (streaming, CPU-based, works now).
+        'whisper' — GStreamer whisper element (requires GStreamer 1.28.1+).
+      </description>
+    </key>
+
+    <!-- Path to vosk model directory. Empty = auto-detect -->
+    <key name="vosk-model-path" type="s">
+      <default>''</default>
+      <summary>VOSK model path</summary>
+      <description>
+        Path to the VOSK speech recognition model directory.
+        Leave empty to auto-detect from ~/.cache/vosk.
+      </description>
+    </key>
+
+    <!-- Path to whisper model file. Empty = auto-detect -->
+    <key name="whisper-model-path" type="s">
+      <default>''</default>
+      <summary>Whisper model path</summary>
+      <description>
+        Path to the Whisper model file (e.g. ggml-base.en.bin).
+        Leave empty to auto-detect from ~/.cache/whisper.
+      </description>
+    </key>
+
+    <!-- Whisper language (BCP-47 code or empty for auto-detect) -->
+    <key name="whisper-language" type="s">
+      <default>'en'</default>
+      <summary>Whisper language</summary>
+      <description>
+        Language code for the Whisper backend (e.g. 'en', 'de', 'fr').
+        Leave empty for auto-detection.
+      </description>
+    </key>
+
+    <!-- ============================================================
+         AI cleanup
+         ============================================================ -->
+
+    <!-- AI cleanup toggle -->
+    <key name="ai-enabled" type="b">
+      <default>true</default>
+      <summary>Enable AI text cleanup</summary>
+      <description>
+        When enabled, raw STT output is sent through an AI model
+        for cleanup before being typed.
+      </description>
+    </key>
+
+    <!-- AI backend: 'anthropic' (cloud) or 'ollama' (local) -->
+    <key name="ai-backend" type="s">
+      <default>'anthropic'</default>
+      <summary>AI cleanup backend</summary>
+      <description>
+        Which AI backend to use for text cleanup.
+        'anthropic' — Anthropic Claude API (cloud, requires API key).
+        'ollama' — Local Ollama server (no API key, runs on your machine).
+      </description>
+    </key>
+
+    <!-- Anthropic API key (stored in GSettings; consider using Secret Service later) -->
+    <key name="anthropic-api-key" type="s">
+      <default>''</default>
+      <summary>Anthropic API key</summary>
+      <description>API key for the Anthropic Claude API.</description>
+    </key>
+
+    <!-- HTTP proxy URL for API requests (e.g. http://localhost:8080) -->
+    <key name="proxy-url" type="s">
+      <default>''</default>
+      <summary>HTTP proxy URL</summary>
+      <description>
+        HTTP proxy URL for Anthropic API requests (e.g. http://localhost:8080).
+        Leave empty to connect directly.
+      </description>
+    </key>
+
+    <!-- CA certificate PEM file for proxy TLS interception -->
+    <key name="proxy-ca-cert" type="s">
+      <default>''</default>
+      <summary>Proxy CA certificate path</summary>
+      <description>
+        Path to a PEM file containing the CA certificate for the proxy.
+        Required when using a TLS-intercepting proxy.
+        Leave empty when not using a proxy.
+      </description>
+    </key>
+
+    <!-- Anthropic model ID -->
+    <key name="anthropic-model" type="s">
+      <default>'claude-haiku-4-5'</default>
+      <summary>Anthropic model</summary>
+      <description>Model ID for the Anthropic API.</description>
+    </key>
+
+    <!-- Ollama server URL -->
+    <key name="ollama-url" type="s">
+      <default>'http://localhost:11434'</default>
+      <summary>Ollama server URL</summary>
+      <description>
+        Base URL for the Ollama server.
+        Default: http://localhost:11434
+      </description>
+    </key>
+
+    <!-- Ollama model name -->
+    <key name="ollama-model" type="s">
+      <default>'qwen2.5:3b'</default>
+      <summary>Ollama model</summary>
+      <description>
+        Model name for Ollama (e.g. 'qwen2.5:3b', 'llama3.2:3b',
+        'qwen2.5:7b'). Must be pulled first with 'ollama pull'.
+      </description>
+    </key>
+
+    <!-- ============================================================
+         AI prompts (external files, reloaded per session)
+         ============================================================ -->
+
+    <!-- Path to the system prompt text file.
+         Empty = use the built-in default prompt. -->
+    <key name="system-prompt-path" type="s">
+      <default>''</default>
+      <summary>System prompt file</summary>
+      <description>
+        Path to a text file containing the AI system prompt.
+        The file is re-read at the start of each recording session,
+        so changes take effect without restarting GNOME Shell.
+        Leave empty to use the built-in default.
+      </description>
+    </key>
+
+    <!-- Path to the framing prompt text file.
+         Empty = use the built-in default framing message.
+         The string {{UUID}} in the file is replaced with the session UUID. -->
+    <key name="framing-prompt-path" type="s">
+      <default>''</default>
+      <summary>Framing prompt file</summary>
+      <description>
+        Path to a text file containing the framing message sent at the
+        start of each recording session. Use {{UUID}} as a placeholder
+        for the per-session UUID. Re-read each session.
+        Leave empty to use the built-in default.
+      </description>
+    </key>
+
+    <!-- ============================================================
+         History
+         ============================================================ -->
+
+    <!-- Max transcript history entries -->
+    <key name="max-transcripts" type="u">
+      <default>100</default>
+      <summary>Max transcript history</summary>
+      <description>Maximum number of transcripts to keep in history.</description>
+    </key>
+
+    <!-- ============================================================
+         Developer mode
+         ============================================================ -->
+
+    <key name="developer-mode" type="b">
+      <default>false</default>
+      <summary>Developer mode</summary>
+      <description>
+        When enabled, audio files are kept after successful transcription
+        and transcripts (raw STT + cleaned AI output) are saved to disk
+        for QA and debugging purposes.
+      </description>
+    </key>
+
+    <!-- Directory for saving dev-mode transcripts and retained audio.
+         Empty = use $XDG_DATA_HOME/speakeasy/transcripts -->
+    <key name="transcript-dir" type="s">
+      <default>''</default>
+      <summary>Transcript save directory</summary>
+      <description>
+        Directory where dev-mode transcripts and audio files are saved.
+        Leave empty to use ~/.local/share/speakeasy/transcripts.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

@@ -1,0 +1,164 @@
+/* Speakeasy panel icon styles */
+
+.speakeasy-icon-idle {
+    color: #888888;
+}
+
+.speakeasy-icon-recording {
+    color: #ff4444;
+}
+
+.speakeasy-icon-locked {
+    color: #ff8800;
+}
+
+.speakeasy-icon-processing {
+    color: #ffaa00;
+}
+
+/* Transcript dialog */
+
+.speakeasy-transcript-dialog .modal-dialog-content-box {
+    min-width: 500px;
+    max-width: 700px;
+}
+
+.speakeasy-transcript-title {
+    font-size: 1.2em;
+    font-weight: bold;
+    margin-bottom: 12px;
+}
+
+.speakeasy-transcript-scroll {
+    max-height: 400px;
+    min-height: 100px;
+}
+
+.speakeasy-transcript-list {
+    spacing: 8px;
+}
+
+.speakeasy-transcript-row {
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 10px;
+    spacing: 4px;
+}
+
+.speakeasy-transcript-time {
+    font-size: 0.85em;
+    color: #999999;
+}
+
+.speakeasy-transcript-copy-button {
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: transparent;
+}
+
+.speakeasy-transcript-copy-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.speakeasy-transcript-copy-button:active {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+.speakeasy-transcript-text {
+    font-size: 1em;
+}
+
+.speakeasy-transcript-raw {
+    font-size: 0.85em;
+    color: #888888;
+    font-style: italic;
+}
+
+.speakeasy-transcript-empty {
+    font-style: italic;
+    color: #999999;
+    padding: 20px 0;
+}
+
+/* Recording overlay styles */
+
+.speakeasy-overlay {
+    background-color: rgba(0, 0, 0, 0.8);
+    border-radius: 12px;
+    padding: 12px;
+    spacing: 8px;
+    width: 28em;
+    height: 8.5em;
+}
+
+.speakeasy-overlay-header {
+    orientation: horizontal;
+    spacing: 8px;
+    align-items: center;
+}
+
+.speakeasy-overlay-mic-icon {
+    icon-size: 24px;
+}
+
+.speakeasy-overlay-mic-recording {
+    color: #ff4444;
+}
+
+.speakeasy-overlay-mic-processing {
+    color: #ffaa00;
+}
+
+.speakeasy-overlay-cancel-button {
+    padding: 4px;
+    border-radius: 12px;
+    background-color: transparent;
+}
+
+.speakeasy-overlay-cancel-button:hover {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+.speakeasy-overlay-cancel-button:active {
+    background-color: rgba(255, 255, 255, 0.25);
+}
+
+.speakeasy-overlay-waveform {
+    /* WaveformDisplay gets its size from CSS or preferred size */
+}
+
+.speakeasy-overlay-scroll {
+}
+
+.speakeasy-overlay-transcript-box {
+    spacing: 4px;
+}
+
+.speakeasy-overlay-final-text {
+    color: #ffffff;
+    font-size: 14px;
+}
+
+.speakeasy-overlay-partial-text {
+    color: #bbbbbb;
+    font-style: italic;
+    font-size: 14px;
+}
+
+.speakeasy-overlay-status-box {
+    orientation: horizontal;
+    spacing: 8px;
+    align-items: center;
+    padding: 8px 0;
+}
+
+.speakeasy-overlay-status-label {
+    color: #ffffff;
+    font-size: 14px;
+}
+
+/* Ensure the waveform has a minimum size */
+.speakeasy-overlay-waveform {
+    min-width: 200px;
+    min-height: 40px;
+}

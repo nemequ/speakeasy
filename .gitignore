@@ -1,0 +1,13 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Linter/tool caches
+.ruff_cache/
+
+# Editor files
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
