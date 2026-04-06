@@ -182,7 +182,7 @@ export class AICleanup {
     _loadSettings() {
         if (!this._settings)
             return;
-        this._apiKey = this._settings.get_string('anthropic-api-key');
+        this._apiKey = this._settings.get_string('anthropic-api-key').trim();
         this._model = this._settings.get_string('anthropic-model') || 'claude-haiku-4-5';
         this._enabled = this._settings.get_boolean('ai-enabled');
         this._systemPromptPath = this._settings.get_string('system-prompt-path');
@@ -219,16 +219,17 @@ export class AICleanup {
                 Gio.ProxyResolver.get_default());
         }
 
+        // Load the proxy CA certificate for accept-certificate validation.
+        // We can't rely on tls-database alone because GLib's TLS backend
+        // doesn't consult it properly for CONNECT-tunneled connections.
+        this._proxyCaCertObj = null;
         if (this._proxyCaCert) {
             try {
-                const tlsDb = Gio.TlsFileDatabase.new(this._proxyCaCert);
-                this._session.set_property('tls-database', tlsDb);
+                this._proxyCaCertObj = Gio.TlsCertificate.new_from_file(
+                    this._proxyCaCert);
             } catch (e) {
                 console.error(`[Speakeasy] Failed to load proxy CA cert: ${e.message}`);
             }
-        } else {
-            // Reset to system default TLS database.
-            this._session.set_property('tls-database', null);
         }
     }
 
@@ -583,7 +584,6 @@ export class AICleanup {
         const body = {
             model: this._model,
             max_tokens: 1,
-            cache_control: {type: 'ephemeral'},
             system: [{
                 type: 'text',
                 text: this._systemPrompt,
@@ -621,7 +621,6 @@ export class AICleanup {
             model: this._model,
             max_tokens: 4096,
             stream: true,
-            cache_control: {type: 'ephemeral'},
             system: [{
                 type: 'text',
                 text: this._systemPrompt,
@@ -661,6 +660,9 @@ export class AICleanup {
                 if (status !== 200) {
                     this._readErrorBody(inputStream, status);
                     lastError = new Error(`HTTP ${status}`);
+                    // Don't retry client errors (4xx) — they won't succeed.
+                    if (status >= 400 && status < 500)
+                        break;
                     continue;
                 }
 
@@ -722,6 +724,10 @@ export class AICleanup {
 
                 lastError = new Error(`HTTP ${status}`);
                 log(`Speakeasy AI: intermediate request got HTTP ${status}`);
+
+                // Don't retry client errors (4xx) — they won't succeed.
+                if (status >= 400 && status < 500)
+                    break;
             } catch (e) {
                 lastError = e;
                 log(`Speakeasy AI: intermediate request attempt ${attempt} failed: ${e.message}`);
@@ -750,6 +756,22 @@ export class AICleanup {
             'application/json',
             new GLib.Bytes(jsonBytes)
         );
+
+        // When a proxy CA cert is configured, validate the server
+        // certificate against it.  GLib's TLS backend does not
+        // consult tls-database for CONNECT-tunneled connections,
+        // so we check the issuer name via accept-certificate.
+        if (this._proxyCaCertObj) {
+            const caSubject = this._proxyCaCertObj.get_subject_name();
+            msg.connect('accept-certificate', (_msg, cert, errors) => {
+                if (errors === 0)
+                    return true;
+                // Only override UNKNOWN_CA (1); reject other errors.
+                if (errors !== 1)
+                    return false;
+                return cert.get_issuer_name() === caSubject;
+            });
+        }
 
         return msg;
     }

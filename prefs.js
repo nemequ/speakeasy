@@ -268,6 +268,42 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         });
         anthropicGroup.add(anthropicModelRow);
 
+        const proxyUrlRow = new Adw.EntryRow({
+            title: _('Proxy URL'),
+            show_apply_button: true,
+            text: settings.get_string('proxy-url'),
+        });
+        proxyUrlRow.connect('apply', () => {
+            settings.set_string('proxy-url', proxyUrlRow.text);
+        });
+        settings.connect('changed::proxy-url', () => {
+            proxyUrlRow.text = settings.get_string('proxy-url');
+        });
+        anthropicGroup.add(proxyUrlRow);
+
+        const proxyCaCertRow = new Adw.EntryRow({
+            title: _('Proxy CA Certificate'),
+            show_apply_button: true,
+            text: settings.get_string('proxy-ca-cert'),
+        });
+        proxyCaCertRow.connect('apply', () => {
+            settings.set_string('proxy-ca-cert', proxyCaCertRow.text);
+        });
+        settings.connect('changed::proxy-ca-cert', () => {
+            proxyCaCertRow.text = settings.get_string('proxy-ca-cert');
+        });
+
+        const proxyCaBrowseButton = new Gtk.Button({
+            icon_name: 'document-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for CA certificate file'),
+        });
+        proxyCaBrowseButton.connect('clicked', () => {
+            this._browseFile(proxyCaCertRow, settings, 'proxy-ca-cert');
+        });
+        proxyCaCertRow.add_suffix(proxyCaBrowseButton);
+        anthropicGroup.add(proxyCaCertRow);
+
         // ── Ollama settings ──
         const ollamaGroup = new Adw.PreferencesGroup({
             title: _('Ollama'),
