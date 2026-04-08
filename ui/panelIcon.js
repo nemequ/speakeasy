@@ -55,6 +55,13 @@ class SpeakeasyPanelIcon extends PanelMenu.Button {
         });
         this.menu.addMenuItem(this._transcriptsItem);
 
+        this._recoverItem = new PopupMenu.PopupMenuItem('Recover from Audio File...');
+        this._recoverItem.connect('activate', () => {
+            if (this._onRecoverFromFile)
+                this._onRecoverFromFile();
+        });
+        this.menu.addMenuItem(this._recoverItem);
+
         this._prefsItem = new PopupMenu.PopupMenuItem('Preferences');
         this._prefsItem.connect('activate', () => {
             if (this._onShowPreferences)
@@ -65,6 +72,7 @@ class SpeakeasyPanelIcon extends PanelMenu.Button {
         // Callbacks
         this._onToggleRecording = null;
         this._onShowTranscripts = null;
+        this._onRecoverFromFile = null;
         this._onShowPreferences = null;
     }
 
@@ -82,6 +90,14 @@ class SpeakeasyPanelIcon extends PanelMenu.Button {
      */
     onShowTranscripts(callback) {
         this._onShowTranscripts = callback;
+    }
+
+    /**
+     * Set callback for when "Recover from Audio File..." is clicked.
+     * @param {function} callback
+     */
+    onRecoverFromFile(callback) {
+        this._onRecoverFromFile = callback;
     }
 
     /**
