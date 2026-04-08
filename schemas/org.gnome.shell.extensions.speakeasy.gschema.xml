@@ -319,26 +319,31 @@
     </key>
 
     <!-- ============================================================
-         Developer mode
+         Diagnostics
          ============================================================ -->
 
-    <key name="developer-mode" type="b">
+    <!-- Verbose logging toggle. When on, the chattier per-event log
+         lines (state transitions, individual STT segments, etc.)
+         are emitted. Audio retention used to be coupled to this
+         setting under the old "developer-mode" name; that is now
+         controlled separately by 'retain-audio'. -->
+    <key name="verbose-logging" type="b">
       <default>false</default>
-      <summary>Developer mode</summary>
+      <summary>Verbose logging</summary>
       <description>
-        When enabled, audio files are kept after successful transcription
-        and transcripts (raw STT + cleaned AI output) are saved to disk
-        for QA and debugging purposes.
+        Emit extra per-event log lines for debugging (state transitions,
+        individual STT segments, AI request internals). Visible via
+        `journalctl --user -g Speakeasy`. Off by default.
       </description>
     </key>
 
-    <!-- Directory for saving dev-mode transcripts and retained audio.
+    <!-- Directory for saving transcripts.
          Empty = use $XDG_DATA_HOME/speakeasy/transcripts -->
     <key name="transcript-dir" type="s">
       <default>''</default>
       <summary>Transcript save directory</summary>
       <description>
-        Directory where dev-mode transcripts and audio files are saved.
+        Directory where transcript JSON files are saved.
         Leave empty to use ~/.local/share/speakeasy/transcripts.
       </description>
     </key>

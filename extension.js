@@ -109,8 +109,10 @@ export default class SpeakeasyExtension extends Extension {
         }
         log(`Speakeasy:   subprocess spawned (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
 
-        // Developer mode state (controls audio retention only)
-        this._devMode = this._settings.get_boolean('developer-mode');
+        // Verbose-logging toggle. Currently still doubles as the
+        // audio-retention switch until Phase 2 introduces the dedicated
+        // 'retain-audio' key.
+        this._verboseLogging = this._settings.get_boolean('verbose-logging');
         this._transcriptDir = this._settings.get_string('transcript-dir');
 
         // Transcript history — loaded from disk so it survives lock/unlock.
@@ -146,9 +148,9 @@ export default class SpeakeasyExtension extends Extension {
             })
         );
         this._settingsChangedIds.push(
-            this._settings.connect('changed::developer-mode', () => {
-                this._devMode = this._settings.get_boolean('developer-mode');
-                log(`Speakeasy: developer mode ${this._devMode ? 'enabled' : 'disabled'}`);
+            this._settings.connect('changed::verbose-logging', () => {
+                this._verboseLogging = this._settings.get_boolean('verbose-logging');
+                log(`Speakeasy: verbose logging ${this._verboseLogging ? 'enabled' : 'disabled'}`);
             })
         );
         this._settingsChangedIds.push(
@@ -491,7 +493,8 @@ export default class SpeakeasyExtension extends Extension {
         const ai = this._ai;
         const output = this._output;
         const settings = this._settings;
-        const devMode = this._devMode;
+        // TODO Phase 2: replace with retain-audio
+        const retainAudio = this._verboseLogging;
 
         const audioPath = recorder.getAudioPath();
         const rawText = await recorder.stop();
@@ -501,7 +504,7 @@ export default class SpeakeasyExtension extends Extension {
 
         // Track this async operation so disable() can wait for it.
         const stopPromise = this._stopRecordingInner(
-            rawText, audioPath, recorder, ai, output, settings, devMode);
+            rawText, audioPath, recorder, ai, output, settings, retainAudio);
         this._pendingStop = stopPromise;
         try {
             await stopPromise;
@@ -516,7 +519,7 @@ export default class SpeakeasyExtension extends Extension {
      * Inner implementation of _stopRecording, using only snapshot
      * references so it survives disable() tearing down this._*.
      */
-    async _stopRecordingInner(rawText, audioPath, recorder, ai, output, settings, devMode) {
+    async _stopRecordingInner(rawText, audioPath, recorder, ai, output, settings, retainAudio) {
         if (!rawText || rawText.trim() === '') {
             log('Speakeasy: no text recognized');
             this._notify('No speech detected.');
@@ -592,14 +595,14 @@ export default class SpeakeasyExtension extends Extension {
         // This uses only GLib/Gio, so it works even mid-teardown.
         if (transcriptOk) {
             const entry = this._saveTranscript(
-                rawText, textToOutput, devMode ? audioPath : null, aiUsed);
+                rawText, textToOutput, retainAudio ? audioPath : null, aiUsed);
             if (entry && this._transcripts)
                 this._transcripts.push(entry);
             this._trimTranscripts();
         }
 
-        // Audio retention: dev mode keeps audio, otherwise delete
-        if (transcriptOk && !devMode) {
+        // Audio retention: keep on disk only when the user opted in.
+        if (transcriptOk && !retainAudio) {
             try { recorder.deleteAudio(); } catch (_e) { /* ignore */ }
         } else if (audioPath) {
             log(`Speakeasy: keeping audio at ${audioPath}`);

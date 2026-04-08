@@ -151,9 +151,9 @@ GSETTINGS_SCHEMA_DIR=~/.local/share/gnome-shell/extensions/speakeasy@speakeasy.l
 GSETTINGS_SCHEMA_DIR=~/.local/share/gnome-shell/extensions/speakeasy@speakeasy.local/schemas/ \
   gsettings set org.gnome.shell.extensions.speakeasy anthropic-api-key 'sk-ant-...'
 
-# Enable developer mode
+# Enable verbose logging
 GSETTINGS_SCHEMA_DIR=~/.local/share/gnome-shell/extensions/speakeasy@speakeasy.local/schemas/ \
-  gsettings set org.gnome.shell.extensions.speakeasy developer-mode true
+  gsettings set org.gnome.shell.extensions.speakeasy verbose-logging true
 ```
 
 ## File Structure

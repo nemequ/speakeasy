@@ -66,10 +66,11 @@ The main entry point. Extends GNOME Shell's `Extension` class. Its
 5. `panelIcon.onToggleRecording()` — click-to-start/stop bypass for
    the keybinding state machine
 
-**Developer mode** (`developer-mode` GSettings key): when enabled,
-successful transcriptions are saved as JSON files in the transcript
-directory, and audio files are not deleted. This is for QA and prompt
-tuning.
+**Verbose logging** (`verbose-logging` GSettings key): when enabled,
+the chattier per-event log lines are emitted (state transitions,
+individual STT segments, AI request internals). Visible via
+`journalctl --user -g Speakeasy`. Audio retention is now controlled
+separately by the `retain-audio` setting.
 
 ### keybinding.js — Push-to-Talk State Machine
 

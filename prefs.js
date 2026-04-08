@@ -545,50 +545,22 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             icon_name: 'applications-engineering-symbolic',
         });
 
-        // ── Developer mode group ──
+        // ── Diagnostics group ──
         const devGroup = new Adw.PreferencesGroup({
-            title: _('Developer Mode'),
-            description: _('Save transcripts and audio files for QA and debugging.'),
+            title: _('Diagnostics'),
+            description: _('Logging and on-disk locations for debugging.'),
         });
         page.add(devGroup);
 
-        const devModeRow = new Adw.SwitchRow({
-            title: _('Enable Developer Mode'),
-            subtitle: _('Keep audio after transcription and save transcript JSON files to disk.'),
+        const verboseRow = new Adw.SwitchRow({
+            title: _('Verbose Logging'),
+            subtitle: _('Emit extra per-event log lines (state transitions, ' +
+                'STT segments, AI internals). Visible via `journalctl --user ' +
+                '-g Speakeasy`.'),
         });
-        settings.bind('developer-mode', devModeRow, 'active',
+        settings.bind('verbose-logging', verboseRow, 'active',
             Gio.SettingsBindFlags.DEFAULT);
-        devGroup.add(devModeRow);
-
-        // Transcript directory
-        const transcriptDirRow = new Adw.EntryRow({
-            title: _('Transcript Directory'),
-            show_apply_button: true,
-            text: settings.get_string('transcript-dir'),
-        });
-        transcriptDirRow.connect('apply', () => {
-            settings.set_string('transcript-dir', transcriptDirRow.text);
-        });
-        settings.connect('changed::transcript-dir', () => {
-            transcriptDirRow.text = settings.get_string('transcript-dir');
-        });
-
-        const transcriptBrowseButton = new Gtk.Button({
-            icon_name: 'folder-open-symbolic',
-            valign: Gtk.Align.CENTER,
-            tooltip_text: _('Browse for transcript directory'),
-        });
-        transcriptBrowseButton.connect('clicked', () => {
-            this._browseFolder(transcriptDirRow, settings, 'transcript-dir');
-        });
-        transcriptDirRow.add_suffix(transcriptBrowseButton);
-        devGroup.add(transcriptDirRow);
-
-        const transcriptHint = new Adw.ActionRow({
-            title: _('Leave empty for ~/.local/share/speakeasy/transcripts'),
-            css_classes: ['dim-label'],
-        });
-        devGroup.add(transcriptHint);
+        devGroup.add(verboseRow);
 
         // ── Prompt files group ──
         const promptGroup = new Adw.PreferencesGroup({
