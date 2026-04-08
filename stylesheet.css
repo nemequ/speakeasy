@@ -177,3 +177,89 @@
     min-width: 200px;
     min-height: 40px;
 }
+
+/* Recovery dialog (transcribe-from-audio-file) */
+
+.speakeasy-recovery-dialog .modal-dialog-content-box {
+    min-width: 540px;
+    max-width: 720px;
+    spacing: 6px;
+}
+
+.speakeasy-recovery-title {
+    font-size: 1.2em;
+    font-weight: bold;
+    margin-bottom: 6px;
+}
+
+.speakeasy-recovery-filename {
+    font-size: 0.9em;
+    color: #bbbbbb;
+    font-family: monospace;
+    margin-bottom: 6px;
+}
+
+.speakeasy-recovery-status {
+    font-size: 1em;
+    color: #ffffff;
+    margin-bottom: 4px;
+}
+
+.speakeasy-recovery-progress {
+    font-size: 0.9em;
+    color: #bbbbbb;
+    font-family: monospace;
+}
+
+.speakeasy-recovery-partial {
+    font-size: 0.85em;
+    color: #888888;
+    font-style: italic;
+    min-height: 1.2em;
+}
+
+.speakeasy-recovery-result-scroll {
+    max-height: 300px;
+    min-height: 100px;
+    margin-top: 8px;
+}
+
+.speakeasy-recovery-result {
+    font-size: 0.9em;
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 10px;
+}
+
+/* Inline path-prompt dialog (zenity/kdialog fallback) */
+
+.speakeasy-path-prompt-dialog .modal-dialog-content-box {
+    min-width: 480px;
+    max-width: 640px;
+    spacing: 8px;
+}
+
+.speakeasy-path-prompt-title {
+    font-size: 1.2em;
+    font-weight: bold;
+    margin-bottom: 6px;
+}
+
+.speakeasy-path-prompt-message {
+    font-size: 0.95em;
+    color: #cccccc;
+    margin-bottom: 8px;
+}
+
+.speakeasy-path-prompt-entry {
+    font-family: monospace;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.speakeasy-path-prompt-entry:focus {
+    border: 1px solid rgba(120, 170, 255, 0.6);
+}

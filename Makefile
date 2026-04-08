@@ -128,6 +128,7 @@ pack: schemas
 	  controller.js \
 	  sessionLog.js \
 	  fileTranscribe.js \
+	  gtk-app.js \
 	  ai.js \
 	  ollama.js \
 	  output.js \
