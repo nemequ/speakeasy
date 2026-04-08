@@ -416,6 +416,17 @@ export class Recorder {
     }
 
     /**
+     * True if the recorder is currently rebuilding its subprocess
+     * after a watchdog kill (or other crash). The caller can use
+     * this to distinguish "model is loading for the first time"
+     * (just wait, it's coming) from "recorder is dead and won't
+     * recover" (give up and notify).
+     */
+    isRespawning() {
+        return this._dyingSubprocess !== null || (this._subprocess !== null && !this._ready);
+    }
+
+    /**
      * Start recording.
      * @returns {boolean} true if the command was sent
      */

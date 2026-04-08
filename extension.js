@@ -90,9 +90,19 @@ export default class SpeakeasyExtension extends Extension {
         // The DictationController owns the recorder/AI/output
         // callbacks; we wire it up after the session log recovery
         // below. The only recorder callback set here is onReady,
-        // which is purely cosmetic logging.
+        // which logs and fires any pending recording start that
+        // was queued while the subprocess was respawning (e.g.
+        // after a watchdog SIGKILL).
         this._recorder.onReady(() => {
             log(`Speakeasy: STT subprocess ready (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms from enable start)`);
+            if (this._pendingStartAfterRespawn) {
+                log('Speakeasy: firing queued recording start after respawn');
+                const cb = this._pendingStartAfterRespawn;
+                this._pendingStartAfterRespawn = null;
+                try { cb(); } catch (e) {
+                    log(`Speakeasy: queued start callback error: ${e.message}`);
+                }
+            }
         });
 
         // Spawn the STT subprocess.  This returns immediately — the
@@ -356,6 +366,9 @@ export default class SpeakeasyExtension extends Extension {
             this._activeTranscriber = null;
         }
 
+        // Drop any queued start that was waiting on a respawn.
+        this._pendingStartAfterRespawn = null;
+
         this._transcripts = null;
         this._settings = null;
         this._pendingStop = null;
@@ -534,6 +547,32 @@ export default class SpeakeasyExtension extends Extension {
 
     _startRecording() {
         log('Speakeasy: starting recording');
+
+        // If the recorder subprocess is mid-respawn (e.g. after a
+        // watchdog kill), don't reject the start outright — queue
+        // it and fire it from the onReady callback. This closes the
+        // window between a watchdog SIGKILL and the new subprocess
+        // being ready, so the user's next trigger press isn't lost.
+        // We only do this if the recorder is actively respawning;
+        // if it's never been ready (e.g. init() failed at startup)
+        // we let the controller's normal isReady check fail loudly.
+        if (!this._recorder?.isReady() && this._recorder?.isRespawning()) {
+            log('Speakeasy: recorder is respawning, queuing start');
+            this._notify('Recorder restarting — recording will begin shortly.');
+            // Replace any earlier pending start: only the most
+            // recent trigger matters. Don't inhibit idle yet — that
+            // happens when the queued start actually fires.
+            this._pendingStartAfterRespawn = () => {
+                this._inhibitIdle();
+                const started = this._controller.start();
+                if (!started) {
+                    this._uninhibitIdle();
+                    this._keybinding.forceState(State.IDLE);
+                }
+            };
+            return;
+        }
+
         this._inhibitIdle();
         const started = this._controller.start();
         if (!started) {
