@@ -17,6 +17,35 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 
+// GStreamer is imported lazily on the first init() call so
+// recorder.init() can do a synchronous plugin-availability check
+// (see checkGstElement). We don't use a static `import` here
+// because that would add GStreamer's startup cost to every load of
+// this module (including tests that never init() a recorder).
+// _loadGstOnce() caches the resolved module — idempotent, cheap.
+let _Gst = null;
+let _gstLoadAttempted = false;
+function _loadGstOnce() {
+    if (_gstLoadAttempted)
+        return _Gst;
+    _gstLoadAttempted = true;
+    try {
+        // Use the legacy `imports.gi` path: it's synchronous and
+        // works identically in both the Shell extension process and
+        // the standalone gtk-app/test gjs processes. ESM dynamic
+        // `import()` would be async and force init() to become
+        // async too, which would cascade through every caller.
+        // eslint-disable-next-line no-undef
+        _Gst = imports.gi.Gst;
+        if (_Gst && !_Gst.is_initialized())
+            _Gst.init(null);
+    } catch (e) {
+        log(`Speakeasy: could not load Gst for plugin check: ${e.message}`);
+        _Gst = null;
+    }
+    return _Gst;
+}
+
 /**
  * Recorder communicates with the STT subprocess to manage recording
  * and speech recognition.  The public API matches the old in-process
@@ -63,6 +92,12 @@ export class Recorder {
 
         // Force-kill timer (so we can cancel it on re-destroy)
         this._forceKillTimerId = 0;
+
+        // Ready watchdog — fires if onReady never arrives after init()
+        this._readyWatchdogId = 0;
+
+        // Last init() failure reason, for UI surfacing
+        this._lastInitFailureReason = null;
 
         // Tracks a subprocess that is shutting down but hasn't exited yet.
         // init() waits for this to resolve before spawning a new process.
@@ -270,7 +305,100 @@ export class Recorder {
         return null;
     }
 
+    // ─── Ready watchdog ─────────────────────────────────────────────
+
+    /**
+     * Arm a one-shot "ready timeout" watchdog: if onReady() does not
+     * fire within `secs` seconds, call `onTimeout`. Used by the
+     * extension/gtk-app to notify the user when the STT subprocess
+     * is hung or crashed during the heavy model load.
+     *
+     * Idempotent: re-arming cancels any previously-armed watchdog.
+     * Automatically cancels itself when `_ready` becomes true (the
+     * _handleMessage('ready') path in this class clears it too).
+     *
+     * @param {number} secs - timeout in seconds; <=0 disables
+     * @param {function} onTimeout - called if the watchdog fires
+     */
+    armReadyWatchdog(secs, onTimeout) {
+        this.cancelReadyWatchdog();
+        if (!secs || secs <= 0)
+            return;
+        // Already ready — no need to arm.
+        if (this._ready)
+            return;
+        this._readyWatchdogId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT, secs,
+            () => {
+                this._readyWatchdogId = 0;
+                if (!this._ready) {
+                    try { onTimeout?.(); } catch (e) {
+                        log(`Speakeasy: readyWatchdog callback error: ${e.message}`);
+                    }
+                }
+                return GLib.SOURCE_REMOVE;
+            }
+        );
+    }
+
+    cancelReadyWatchdog() {
+        if (this._readyWatchdogId) {
+            GLib.source_remove(this._readyWatchdogId);
+            this._readyWatchdogId = 0;
+        }
+    }
+
+    // ─── GStreamer plugin check ─────────────────────────────────────
+
+    /**
+     * Check whether a GStreamer element factory is registered. Takes
+     * the factory-find function as a parameter so tests can inject a
+     * mock — the real call path in init() passes a closure around
+     * Gst.ElementFactory.find().
+     *
+     * Returns an object {ok, missing} so callers can log / notify
+     * with a specific element name instead of a generic "something
+     * is missing" message.
+     *
+     * @param {string} elementName - e.g. 'vosk' or 'whisper'
+     * @param {function(string):object|null} findFn - factory finder
+     * @returns {{ok: boolean, missing: ?string}}
+     */
+    static checkGstElement(elementName, findFn) {
+        if (typeof findFn !== 'function')
+            return {ok: false, missing: elementName};
+        let factory = null;
+        try {
+            factory = findFn(elementName);
+        } catch (_e) {
+            factory = null;
+        }
+        if (!factory)
+            return {ok: false, missing: elementName};
+        return {ok: true, missing: null};
+    }
+
+    /**
+     * Map a backend name to the GStreamer element it depends on.
+     * @param {string} backend
+     * @returns {?string}
+     */
+    static gstElementForBackend(backend) {
+        if (backend === 'vosk') return 'vosk';
+        if (backend === 'whisper') return 'whisper';
+        return null;
+    }
+
     // ─── Init / lifecycle ───────────────────────────────────────────
+
+    /**
+     * Last result of a plugin check, or null if init() hasn't run
+     * yet. Consumed by extension.js / gtk-app.js to show a specific
+     * "install the GST plugin" message when init() returns false.
+     */
+    getLastInitFailureReason() {
+        return this._lastInitFailureReason ?? null;
+    }
 
     /**
      * Spawn the STT subprocess.  Returns true if the subprocess was
@@ -301,6 +429,7 @@ export class Recorder {
         }
 
         const t0 = GLib.get_monotonic_time();
+        this._lastInitFailureReason = null;
 
         // Resolve model path
         let modelPath;
@@ -308,6 +437,12 @@ export class Recorder {
             modelPath = this._voskModelPath || Recorder.detectVoskModelPath();
             if (!modelPath) {
                 log('Speakeasy: no VOSK model found');
+                this._lastInitFailureReason = {
+                    kind: 'no-model',
+                    backend: 'vosk',
+                    message: 'No VOSK model found at ~/.cache/vosk. ' +
+                             'See README for installation instructions.',
+                };
                 return false;
             }
             this._voskModelPath = modelPath;
@@ -315,12 +450,54 @@ export class Recorder {
             modelPath = this._whisperModelPath || Recorder.detectWhisperModelPath();
             if (!modelPath) {
                 log('Speakeasy: no Whisper model found');
+                this._lastInitFailureReason = {
+                    kind: 'no-model',
+                    backend: 'whisper',
+                    message: 'No Whisper model found at ~/.cache/whisper. ' +
+                             'See README for installation instructions.',
+                };
                 return false;
             }
             this._whisperModelPath = modelPath;
         } else {
             log(`Speakeasy: unknown STT backend "${this._backend}"`);
+            this._lastInitFailureReason = {
+                kind: 'unknown-backend',
+                backend: this._backend,
+                message: `Unknown STT backend "${this._backend}".`,
+            };
             return false;
+        }
+
+        // Check that the backend's GStreamer element is registered.
+        // This is the "gst-vosk plugin not installed" early-warning:
+        // without it, the subprocess fails deep inside Gst.parse_launch
+        // with a cryptic "no element 'vosk'" message that the user
+        // never sees. We surface it here with actionable instructions.
+        const Gst = _loadGstOnce();
+        if (Gst) {
+            const elementName = Recorder.gstElementForBackend(this._backend);
+            if (elementName) {
+                const check = Recorder.checkGstElement(
+                    elementName, (n) => Gst.ElementFactory.find(n));
+                if (!check.ok) {
+                    const pkg = elementName === 'vosk'
+                        ? 'gstreamer1-plugin-vosk'
+                        : `gstreamer1-plugin-${elementName}`;
+                    const msg = `GStreamer plugin missing: no element "${elementName}". ` +
+                                `Install ${pkg} (Fedora: sudo dnf install ${pkg}) ` +
+                                `or your distro's equivalent.`;
+                    log(`Speakeasy: ${msg}`);
+                    this._lastInitFailureReason = {
+                        kind: 'missing-gst-plugin',
+                        backend: this._backend,
+                        element: elementName,
+                        pkg,
+                        message: msg,
+                    };
+                    return false;
+                }
+            }
         }
 
         const scriptPath = GLib.build_filenamev([
@@ -682,6 +859,7 @@ export class Recorder {
             case 'ready':
                 log('Speakeasy: STT subprocess ready');
                 this._ready = true;
+                this.cancelReadyWatchdog();
                 if (this._onReady)
                     this._onReady();
                 break;
@@ -743,6 +921,9 @@ export class Recorder {
 
         // Cancel the stop watchdog timer if armed.
         this._cancelStopWatchdog();
+
+        // Cancel the ready watchdog timer if armed.
+        this.cancelReadyWatchdog();
 
         if (this._subprocess) {
             this._sendCommand({cmd: 'quit'});

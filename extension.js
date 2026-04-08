@@ -110,8 +110,30 @@ export default class SpeakeasyExtension extends Extension {
         // heavy work (GStreamer init, VOSK model load) happens in the
         // child process.  The recorder fires onReady() when the model
         // is loaded and it's ready to accept recording commands.
+        //
+        // If init() returns false, surface the specific failure
+        // reason (missing model, missing gst-vosk plugin, etc.) as
+        // a user-visible notification — the old code just logged a
+        // generic warning and left the icon in the perpetual
+        // "loading" state with no hint of what to do.
         if (!this._recorder.init()) {
-            log('Speakeasy: WARNING — STT subprocess failed to launch');
+            const reason = this._recorder.getLastInitFailureReason?.();
+            const msg = reason?.message ??
+                'STT subprocess failed to launch. See journalctl for details.';
+            log(`Speakeasy: WARNING — STT subprocess failed to launch: ${msg}`);
+            this._notify(msg);
+        } else {
+            // Arm a ready-timeout watchdog: if the subprocess
+            // doesn't fire its "ready" event within 30s, the model
+            // load is hung or the process crashed. Tell the user
+            // instead of leaving the icon spinning forever.
+            this._recorder.armReadyWatchdog?.(30, () => {
+                log('Speakeasy: STT subprocess ready-timeout fired after 30s');
+                this._notify(
+                    'Speakeasy: STT model failed to load within 30 seconds. ' +
+                    'The subprocess may be hung or crashing. ' +
+                    'Check journalctl --user -g Speakeasy for details.');
+            });
         }
         log(`Speakeasy:   subprocess spawned (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
 

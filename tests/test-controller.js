@@ -345,6 +345,65 @@ const loop = GLib.MainLoop.new(null, false);
         }
     });
 
+    await test('AI timeout surfaces timeout-specific error message', async () => {
+        // When finalize() throws a Gio.IOErrorEnum.TIMED_OUT, the
+        // controller should fire onError with a message mentioning
+        // "timed out" — not the generic cleanup error text. The
+        // transcript must still save (bug-fix guarantee).
+        const t = makeController();
+        try {
+            const timeoutErr = new GLib.Error(
+                Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT, 'request timed out');
+            t.ai.finalize = async () => { throw timeoutErr; };
+            t.controller.start();
+            t.controller.commit();
+            t.recorder.fireFinal('important content');
+            t.recorder.setStopText('important content');
+
+            const entry = await t.controller.stop();
+            assert(entry !== null, 'transcript still saved');
+            assertEqual(entry.cleanedText, 'important content', 'raw text used');
+            const hasTimeoutMsg = t.events.errors.some(m => /timed out/i.test(m));
+            assert(hasTimeoutMsg, `expected a timeout error message, got: ${JSON.stringify(t.events.errors)}`);
+        } finally {
+            rmrf(t.tmpDir);
+        }
+    });
+
+    await test('AI network failure surfaces network-specific error message', async () => {
+        const t = makeController();
+        try {
+            const netErr = new GLib.Error(
+                Gio.io_error_quark(), Gio.IOErrorEnum.NETWORK_UNREACHABLE, 'no route');
+            t.ai.finalize = async () => { throw netErr; };
+            t.controller.start();
+            t.controller.commit();
+            t.recorder.setStopText('stuff');
+
+            await t.controller.stop();
+            const hasNetMsg = t.events.errors.some(m => /network|proxy|unreachable/i.test(m));
+            assert(hasNetMsg, `expected a network error message, got: ${JSON.stringify(t.events.errors)}`);
+        } finally {
+            rmrf(t.tmpDir);
+        }
+    });
+
+    await test('AI HTTP error (thrown as "HTTP 500") surfaces http-specific message', async () => {
+        const t = makeController();
+        try {
+            t.ai.finalize = async () => { throw new Error('HTTP 500'); };
+            t.controller.start();
+            t.controller.commit();
+            t.recorder.setStopText('stuff');
+
+            await t.controller.stop();
+            const hasHttpMsg = t.events.errors.some(m => /HTTP/.test(m));
+            assert(hasHttpMsg, `expected an HTTP error message, got: ${JSON.stringify(t.events.errors)}`);
+        } finally {
+            rmrf(t.tmpDir);
+        }
+    });
+
     await test('output failure (typeText returns false) still saves transcript', async () => {
         const t = makeController();
         try {

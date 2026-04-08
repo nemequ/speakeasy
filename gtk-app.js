@@ -329,6 +329,20 @@ app.connect('activate', () => {
         onLog: (msg) => print(`[gtk-app] ${msg}`),
     });
 
+    // Helper to prepend an error message into the result view — the
+    // GTK app has no MessageTray so this is where the user sees
+    // startup failures (missing model, missing gst plugin, ready
+    // watchdog timeout, etc.). Keeps the start button disabled so
+    // the user doesn't try to record into a broken recorder.
+    function showStartupError(msg) {
+        print(`[gtk-app] STARTUP ERROR: ${msg}`);
+        const buffer = resultView.tv.buffer;
+        const end = buffer.get_end_iter();
+        buffer.insert(end, `[startup error] ${msg}\n`, -1);
+        startBtn.sensitive = false;
+        statusBox.set_tooltip_text(msg);
+    }
+
     // Wait for the recorder subprocess to be ready before allowing
     // start. The button is enabled by default; we just disable it
     // until ready and re-enable in the onReady callback.
@@ -340,7 +354,19 @@ app.connect('activate', () => {
         startBtn.sensitive = controller.getState() === ControllerState.IDLE;
     });
     if (!recorder.init()) {
-        print('[gtk-app] WARNING: STT subprocess failed to launch');
+        const reason = recorder.getLastInitFailureReason?.();
+        showStartupError(reason?.message ??
+            'STT subprocess failed to launch. See stderr for details.');
+    } else {
+        // 30s ready-timeout watchdog: same semantics as the Shell
+        // extension. If the model doesn't load in 30s, surface a
+        // visible error in the result view and keep the start
+        // button disabled.
+        recorder.armReadyWatchdog?.(30, () => {
+            showStartupError(
+                'STT model failed to load within 30 seconds. ' +
+                'The subprocess may be hung or crashing. Check stderr.');
+        });
     }
 
     // Buttons

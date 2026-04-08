@@ -40,6 +40,7 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 
 import {SessionLog} from './sessionLog.js';
+import {classifyAiError, aiErrorUserMessage, AiErrorCategory} from './errorClassifier.js';
 
 /**
  * Lifecycle states the controller cycles through. The keybinding
@@ -334,7 +335,15 @@ export class DictationController {
                 // The user lost a session because finalize() blocked
                 // forever — now we fall through to raw text output
                 // and the transcript still saves.
-                this._log(`Speakeasy controller: AI cleanup error: ${e.message}`);
+                //
+                // Classify the error so the user gets a useful
+                // message (timeout vs network vs HTTP) instead of a
+                // generic "cleanup error". The transcript still
+                // saves either way; this is purely the message they
+                // see in the notification / result view.
+                const category = classifyAiError(e);
+                this._log(`Speakeasy controller: AI cleanup error [${category}]: ${e.message}`);
+                this._fireError(aiErrorUserMessage(category, e));
             }
         }
 

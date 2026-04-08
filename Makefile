@@ -42,8 +42,10 @@ test:
 	gjs -m tests/test-session-log.js
 	gjs -m tests/test-controller.js
 	gjs -m tests/test-recorder-watchdog.js
+	gjs -m tests/test-recorder-init.js
 	gjs -m tests/test-file-transcribe.js
 	gjs -m tests/test-transcript-store.js
+	gjs -m tests/test-error-classifier.js
 
 ## Launch the standalone GTK test app. Drives the same dictation
 ## controller as the Shell extension but in a normal Gtk.Application
