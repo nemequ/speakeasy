@@ -21,7 +21,7 @@ dbus-run-session gnome-shell --devkit --wayland
 
 # With a different trigger key (avoids conflict with host session)
 dbus-run-session bash -c \
-  "gsettings set org.gnome.shell.extensions.speakeasy trigger-accel 'Scroll_Lock' \
+  "gsettings set org.gnome.shell.extensions.speakeasy trigger-accels \"['Scroll_Lock']\" \
    && gnome-shell --devkit --wayland"
 ```
 

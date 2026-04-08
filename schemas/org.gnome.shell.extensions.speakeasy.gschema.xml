@@ -3,18 +3,20 @@
   <schema id="org.gnome.shell.extensions.speakeasy"
           path="/org/gnome/shell/extensions/speakeasy/">
 
-    <!-- Trigger key: accelerator string for grab_accelerator.
-         Must be a non-modifier key (Pause, Scroll_Lock, F13, etc.)
-         or a combo like <Ctrl><Shift>d.
-         Modifier-only keys do NOT work. -->
-    <key name="trigger-accel" type="s">
-      <default>'Pause'</default>
-      <summary>Push-to-talk trigger key</summary>
+    <!-- Trigger keys: list of accelerator strings for grab_accelerator.
+         Each entry must be a non-modifier key (Pause, Scroll_Lock, F13,
+         etc.) or a combo like <Ctrl><Shift>d. Multiple entries let
+         different keyboards (or a Steam Deck button mapped via Steam
+         Input) all trigger push-to-talk. Modifier-only keys do NOT work. -->
+    <key name="trigger-accels" type="as">
+      <default>['Pause']</default>
+      <summary>Push-to-talk trigger keys</summary>
       <description>
-        Accelerator string for the push-to-talk trigger key.
-        Default is the Pause key. Examples: 'Pause', 'Scroll_Lock',
-        'F13', '&lt;Ctrl&gt;&lt;Shift&gt;d'.
-        Modifier-only keys (Control_R, etc.) are NOT supported.
+        List of accelerator strings for the push-to-talk trigger.
+        Any of the listed keys will activate recording. Default is
+        the Pause key. Examples: 'Pause', 'Scroll_Lock', 'F13',
+        '&lt;Ctrl&gt;&lt;Shift&gt;d'. Modifier-only keys (Control_R,
+        etc.) are NOT supported.
       </description>
     </key>
 

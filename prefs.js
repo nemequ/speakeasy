@@ -33,29 +33,71 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         // ── Keybinding group ──
         const keybindGroup = new Adw.PreferencesGroup({
-            title: _('Keybinding'),
-            description: _('Configure the push-to-talk trigger key.'),
+            title: _('Keybindings'),
+            description: _('One or more push-to-talk trigger keys. ' +
+                'Pressing any of them activates recording — useful when ' +
+                'you switch between keyboards or want to bind a Steam ' +
+                'Deck button via Steam Input.'),
         });
         page.add(keybindGroup);
 
-        const accelRow = new Adw.ActionRow({
-            title: _('Trigger Key'),
-            subtitle: settings.get_string('trigger-accel'),
+        // Header row with "Add Key" button
+        const addKeyRow = new Adw.ActionRow({
+            title: _('Trigger Keys'),
         });
-
-        const accelButton = new Gtk.Button({
-            label: _('Set Key'),
+        const addKeyButton = new Gtk.Button({
+            label: _('Add Key'),
             valign: Gtk.Align.CENTER,
+            css_classes: ['suggested-action'],
         });
-        accelButton.connect('clicked', () => {
-            this._showAccelDialog(accelRow, settings, accelButton);
+        addKeyButton.connect('clicked', () => {
+            this._showAccelDialog(settings, addKeyButton);
         });
-        accelRow.add_suffix(accelButton);
-        keybindGroup.add(accelRow);
+        addKeyRow.add_suffix(addKeyButton);
+        keybindGroup.add(addKeyRow);
 
-        settings.connect('changed::trigger-accel', () => {
-            accelRow.subtitle = settings.get_string('trigger-accel');
-        });
+        // Track dynamically-added rows so we can rebuild on change
+        let accelRows = [];
+        const rebuildAccelRows = () => {
+            for (const row of accelRows)
+                keybindGroup.remove(row);
+            accelRows = [];
+
+            const accels = settings.get_strv('trigger-accels');
+            if (accels.length === 0) {
+                const emptyRow = new Adw.ActionRow({
+                    title: _('No trigger keys configured'),
+                    subtitle: _('Click "Add Key" to bind one.'),
+                });
+                keybindGroup.add(emptyRow);
+                accelRows.push(emptyRow);
+                return;
+            }
+
+            for (let i = 0; i < accels.length; i++) {
+                const accel = accels[i];
+                const idx = i;
+                const row = new Adw.ActionRow({
+                    title: accel,
+                });
+                const removeButton = new Gtk.Button({
+                    icon_name: 'edit-delete-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: _('Remove this trigger key'),
+                    css_classes: ['flat'],
+                });
+                removeButton.connect('clicked', () => {
+                    const current = settings.get_strv('trigger-accels');
+                    current.splice(idx, 1);
+                    settings.set_strv('trigger-accels', current);
+                });
+                row.add_suffix(removeButton);
+                keybindGroup.add(row);
+                accelRows.push(row);
+            }
+        };
+        rebuildAccelRows();
+        settings.connect('changed::trigger-accels', rebuildAccelRows);
 
         // ── History group ──
         const historyGroup = new Adw.PreferencesGroup({
@@ -566,14 +608,15 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /**
-     * Show a dialog to capture an accelerator keypress.
+     * Show a dialog to capture an accelerator keypress and append it
+     * to the trigger-accels list. Duplicate accels are ignored.
      */
-    _showAccelDialog(row, settings, button) {
+    _showAccelDialog(settings, button) {
         const window = button.get_root();
 
         const dialog = new Adw.AlertDialog({
             heading: _('Press a Key'),
-            body: _('Press the key you want to use as the push-to-talk trigger.\n' +
+            body: _('Press the key you want to add as a push-to-talk trigger.\n' +
                     'Modifier-only keys (Ctrl, Alt, Super) are not supported.'),
         });
         dialog.add_response('cancel', _('Cancel'));
@@ -599,8 +642,14 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             const accel = Gtk.accelerator_name(keyval, cleanState);
 
             if (accel) {
-                settings.set_string('trigger-accel', accel);
-                log(`Speakeasy prefs: trigger key set to "${accel}"`);
+                const current = settings.get_strv('trigger-accels');
+                if (!current.includes(accel)) {
+                    current.push(accel);
+                    settings.set_strv('trigger-accels', current);
+                    log(`Speakeasy prefs: trigger key added "${accel}"`);
+                } else {
+                    log(`Speakeasy prefs: trigger key "${accel}" already bound — ignoring`);
+                }
             }
 
             dialog.force_close();

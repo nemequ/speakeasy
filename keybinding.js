@@ -74,14 +74,15 @@ const DEFAULTS = Object.freeze({
 export class KeybindingManager {
     /**
      * @param {object} opts
-     * @param {string}   opts.triggerAccel
+     * @param {string[]} opts.triggerAccels - list of accelerator strings;
+     *     pressing any one of them activates the trigger.
      * @param {function} opts.onStartRecording
      * @param {function} opts.onStopRecording
      * @param {function} opts.onStateChanged
      * @param {Gio.Settings} [opts.settings] - GSettings for timing parameters
      */
-    constructor({triggerAccel, onStartRecording, onStopRecording, onStateChanged, settings}) {
-        this._triggerAccel = triggerAccel;
+    constructor({triggerAccels, onStartRecording, onStopRecording, onStateChanged, settings}) {
+        this._triggerAccels = [...(triggerAccels ?? [])];
         this._onStartRecording = onStartRecording;
         this._onStopRecording = onStopRecording;
         this._onStateChanged = onStateChanged;
@@ -91,7 +92,8 @@ export class KeybindingManager {
         this._loadTimingParams();
 
         this._state = State.IDLE;
-        this._grabAction = 0;
+        // Map of grab action id -> accelerator string for currently grabbed keys
+        this._grabActions = new Map();
         this._activatedId = 0;
 
         // Gap detection
@@ -149,16 +151,16 @@ export class KeybindingManager {
         this._activatedId = global.display.connect(
             'accelerator-activated',
             (_display, action, _device, _timestamp) => {
-                if (action === this._grabAction)
+                if (this._grabActions.has(action))
                     this._onKeyEvent();
             });
 
-        this._grab(this._triggerAccel);
-        log(`Speakeasy: keybinding enabled (accel="${this._triggerAccel}", action=${this._grabAction})`);
+        this._grabAll(this._triggerAccels);
+        log(`Speakeasy: keybinding enabled (accels=[${this._triggerAccels.join(', ')}], actions=[${[...this._grabActions.keys()].join(', ')}])`);
     }
 
     disable() {
-        this._ungrab();
+        this._ungrabAll();
 
         if (this._activatedId) {
             global.display.disconnect(this._activatedId);
@@ -184,33 +186,37 @@ export class KeybindingManager {
         }
     }
 
-    _grab(accel) {
-        this._ungrab();
+    _grabAll(accels) {
+        this._ungrabAll();
 
-        this._grabAction = global.display.grab_accelerator(accel, 0);
-        if (this._grabAction === Meta.KeyBindingAction.NONE) {
-            log(`Speakeasy: failed to grab accelerator "${accel}"`);
-            return;
+        for (const accel of accels) {
+            if (!accel)
+                continue;
+            const action = global.display.grab_accelerator(accel, 0);
+            if (action === Meta.KeyBindingAction.NONE) {
+                log(`Speakeasy: failed to grab accelerator "${accel}"`);
+                continue;
+            }
+            const name = Meta.external_binding_name_for_action(action);
+            Main.wm.allowKeybinding(name, Shell.ActionMode.ALL);
+            this._grabActions.set(action, accel);
+            log(`Speakeasy: grabbed "${accel}" as action ${action} (binding: ${name})`);
         }
-
-        const name = Meta.external_binding_name_for_action(this._grabAction);
-        Main.wm.allowKeybinding(name, Shell.ActionMode.ALL);
-        log(`Speakeasy: grabbed "${accel}" as action ${this._grabAction} (binding: ${name})`);
     }
 
-    _ungrab() {
-        if (this._grabAction && this._grabAction !== Meta.KeyBindingAction.NONE) {
-            const name = Meta.external_binding_name_for_action(this._grabAction);
+    _ungrabAll() {
+        for (const [action, accel] of this._grabActions) {
+            const name = Meta.external_binding_name_for_action(action);
             Main.wm.allowKeybinding(name, Shell.ActionMode.NONE);
-            global.display.ungrab_accelerator(this._grabAction);
-            log(`Speakeasy: ungrabbed action ${this._grabAction}`);
-            this._grabAction = 0;
+            global.display.ungrab_accelerator(action);
+            log(`Speakeasy: ungrabbed action ${action} ("${accel}")`);
         }
+        this._grabActions.clear();
     }
 
-    setTriggerAccel(accel) {
-        this._triggerAccel = accel;
-        this._grab(accel);
+    setTriggerAccels(accels) {
+        this._triggerAccels = [...accels];
+        this._grabAll(this._triggerAccels);
     }
 
     getState() {

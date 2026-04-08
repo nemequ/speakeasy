@@ -143,9 +143,9 @@ All settings live under `org.gnome.shell.extensions.speakeasy`. Key
 settings can be changed from the command line:
 
 ```sh
-# Set the trigger key
+# Set the trigger keys (one or more — pressing any of them activates push-to-talk)
 GSETTINGS_SCHEMA_DIR=~/.local/share/gnome-shell/extensions/speakeasy@speakeasy.local/schemas/ \
-  gsettings set org.gnome.shell.extensions.speakeasy trigger-accel 'Scroll_Lock'
+  gsettings set org.gnome.shell.extensions.speakeasy trigger-accels "['Scroll_Lock', 'Pause']"
 
 # Set the Anthropic API key
 GSETTINGS_SCHEMA_DIR=~/.local/share/gnome-shell/extensions/speakeasy@speakeasy.local/schemas/ \

@@ -122,7 +122,7 @@ export default class SpeakeasyExtension extends Extension {
 
         // Create keybinding manager with settings for timing parameters
         this._keybinding = new KeybindingManager({
-            triggerAccel: this._settings.get_string('trigger-accel'),
+            triggerAccels: this._settings.get_strv('trigger-accels'),
             onStartRecording: () => this._startRecording(),
             onStopRecording: () => this._stopRecording(),
             onStateChanged: (state) => this._panelIcon.setState(state),
@@ -140,9 +140,9 @@ export default class SpeakeasyExtension extends Extension {
         // Listen for settings changes
         this._settingsChangedIds = [];
         this._settingsChangedIds.push(
-            this._settings.connect('changed::trigger-accel', () => {
-                this._keybinding.setTriggerAccel(
-                    this._settings.get_string('trigger-accel'));
+            this._settings.connect('changed::trigger-accels', () => {
+                this._keybinding.setTriggerAccels(
+                    this._settings.get_strv('trigger-accels'));
             })
         );
         this._settingsChangedIds.push(
