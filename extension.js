@@ -16,6 +16,7 @@ import {OllamaCleanup} from './ollama.js';
 import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
+import {rerunAiCleanup as rerunAiCleanupOnEntry} from './transcriptStore.js';
 import {PanelIcon} from './ui/panelIcon.js';
 import {TranscriptDialog} from './ui/transcriptDialog.js';
 import {RecoveryDialog} from './ui/recoveryDialog.js';
@@ -674,6 +675,8 @@ export default class SpeakeasyExtension extends Extension {
                             rawText: data.raw_text,
                             cleanedText: data.cleaned_text,
                             aiEnabled: data.ai_enabled ?? false,
+                            recovered: data.recovered ?? false,
+                            audioPath: data.audio_path ?? null,
                             filePath: path,
                         });
                     } catch (_e) {
@@ -778,8 +781,59 @@ export default class SpeakeasyExtension extends Extension {
                 this.clearTranscripts();
                 dialog.close();
             },
+            onDelete: (entry) => this._deleteTranscript(entry),
+            onRerunCleanup: (entry) => this._rerunCleanupForEntry(entry),
         });
         dialog.open();
+    }
+
+    /**
+     * Delete a single transcript: remove from in-memory list and
+     * delete the JSON file from disk. Called by TranscriptDialog's
+     * per-row delete button.
+     */
+    _deleteTranscript(entry) {
+        if (!entry)
+            return false;
+        if (this._transcripts) {
+            const idx = this._transcripts.indexOf(entry);
+            if (idx !== -1)
+                this._transcripts.splice(idx, 1);
+        }
+        if (entry.filePath) {
+            try {
+                Gio.File.new_for_path(entry.filePath).delete(null);
+            } catch (_e) { /* already gone */ }
+        }
+        log(`Speakeasy: deleted transcript ${entry.filePath ?? '(no path)'}`);
+        return true;
+    }
+
+    /**
+     * Re-run AI cleanup on an existing transcript entry. Uses an
+     * isolated AI instance so a live dictation session can be in
+     * progress concurrently.
+     *
+     * @returns {Promise<boolean>} true on success
+     */
+    async _rerunCleanupForEntry(entry) {
+        if (!entry)
+            return false;
+        const isolatedAi = this._createIsolatedAi();
+        if (!isolatedAi) {
+            log('Speakeasy: re-run cleanup skipped — no AI available');
+            return false;
+        }
+        try {
+            const ok = await rerunAiCleanupOnEntry(entry, isolatedAi);
+            if (ok)
+                log(`Speakeasy: re-ran AI cleanup on transcript ${entry.filePath ?? ''}`);
+            else
+                log(`Speakeasy: re-run AI cleanup failed for ${entry.filePath ?? ''}`);
+            return ok;
+        } finally {
+            try { isolatedAi.destroy(); } catch (_e) { /* ignore */ }
+        }
     }
 
     /**

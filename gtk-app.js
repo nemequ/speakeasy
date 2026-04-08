@@ -32,6 +32,7 @@ import {OllamaCleanup} from './ollama.js';
 import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
+import {openTranscriptHistoryWindow} from './ui/transcriptHistoryWindow.js';
 
 const APP_ID = 'local.speakeasy.test';
 const SCHEMA_ID = 'org.gnome.shell.extensions.speakeasy';
@@ -257,12 +258,26 @@ app.connect('activate', () => {
     const stopBtn = new Gtk.Button({label: 'Stop (F6)', sensitive: false});
     const discardBtn = new Gtk.Button({label: 'Discard (F7)', sensitive: false});
     const recoverBtn = new Gtk.Button({label: 'Recover from File...'});
+    const historyBtn = new Gtk.Button({label: 'Show Transcripts'});
     const clearBtn = new Gtk.Button({label: 'Clear views'});
     buttonBox.append(startBtn);
     buttonBox.append(stopBtn);
     buttonBox.append(discardBtn);
     buttonBox.append(recoverBtn);
+    buttonBox.append(historyBtn);
     buttonBox.append(clearBtn);
+
+    // Transcript history window
+    const transcriptDir = GLib.build_filenamev([
+        GLib.get_user_data_dir(), 'speakeasy', 'transcripts',
+    ]);
+    historyBtn.connect('clicked', () => {
+        openTranscriptHistoryWindow({
+            parent: window,
+            transcriptDir,
+            getAi: () => ai,
+        });
+    });
 
     // ── Build the controller ──
     const output = new TextViewOutput(resultView.tv);

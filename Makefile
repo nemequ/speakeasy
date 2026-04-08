@@ -43,6 +43,7 @@ test:
 	gjs -m tests/test-controller.js
 	gjs -m tests/test-recorder-watchdog.js
 	gjs -m tests/test-file-transcribe.js
+	gjs -m tests/test-transcript-store.js
 
 ## Launch the standalone GTK test app. Drives the same dictation
 ## controller as the Shell extension but in a normal Gtk.Application
@@ -121,6 +122,7 @@ pack: schemas
 	  recorder.js \
 	  controller.js \
 	  sessionLog.js \
+	  transcriptStore.js \
 	  fileTranscribe.js \
 	  gtk-app.js \
 	  ai.js \
