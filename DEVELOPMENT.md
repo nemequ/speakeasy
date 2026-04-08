@@ -11,15 +11,66 @@
 
 ## Development Workflow
 
-### Nested GNOME Shell (devkit)
+There are three main iteration loops, in order of speed:
 
-The fastest way to iterate on extension code without logging out:
+| Loop | Command | When to use |
+|------|---------|-------------|
+| Unit tests | `make test` | Anything that doesn't need the recorder, AI, or UI |
+| Standalone GTK app | `make gtk` | Recorder + AI + transcript pipeline; full controller flow without GNOME Shell. Reloads on every run, no logout needed. |
+| Nested gnome-shell | `make dev` | Anything that touches the panel icon, overlay, dialogs, keybindings, or other Shell-only APIs |
+
+### Quick reference: Make targets
+
+```
+make help        # list targets
+make schemas     # compile gschemas (run after editing the XML)
+make test        # run all unit tests under gjs
+make gtk         # launch the standalone GTK test app
+make dev         # launch a nested gnome-shell --devkit session
+make install     # symlink this checkout into ~/.local/share/gnome-shell/extensions
+make uninstall   # remove the install symlink
+make pack        # build speakeasy@speakeasy.local.shell-extension.zip
+make lint        # run eslint over the JS sources (requires eslint)
+make logs        # tail journalctl for Speakeasy log lines
+```
+
+### Standalone GTK Test App
+
+The fastest way to iterate on the recorder + AI + transcript
+pipeline without restarting GNOME Shell:
 
 ```sh
-# Basic — logs to terminal, close window to stop
-dbus-run-session gnome-shell --devkit --wayland
+make gtk
+```
 
-# With a different trigger key (avoids conflict with host session)
+Spawns a regular `Gtk.Application` window that drives the same
+`DictationController` as the Shell extension. Has Start / Stop /
+Discard / "Recover from File..." / Clear buttons, an audio level
+bar, a state label, an AI backend selector, and two text views
+(live STT finals + cleaned output). Reuses the user's GSettings
+schema so the API key and other config are picked up
+automatically.
+
+What it CAN'T test (use the nested devkit for these):
+- Panel icon, recording overlay, modal dialogs (St / Clutter
+  widgets only exist inside gnome-shell)
+- Global trigger key (use the in-window F5 / F6 / F7 shortcuts
+  or the buttons instead)
+- Clipboard / virtual-keyboard paste (output goes to a Gtk
+  TextView in the app instead, which is enough to verify the
+  pipeline ran)
+
+### Nested GNOME Shell (devkit)
+
+When you do need to test Shell-only surfaces:
+
+```sh
+make dev
+```
+
+This wraps:
+
+```sh
 dbus-run-session bash -c \
   "gsettings set org.gnome.shell.extensions.speakeasy trigger-accels \"['Scroll_Lock']\" \
    && gnome-shell --devkit --wayland"
@@ -47,10 +98,12 @@ Ctrl+C) to stop, edit code, relaunch.
 After modifying the GSettings XML schema:
 
 ```sh
-glib-compile-schemas schemas/
+make schemas
 ```
 
-The compiled schema must be up to date before the extension loads.
+(Or directly: `glib-compile-schemas schemas/`.) The compiled
+schema must be up to date before the extension loads. `make dev`
+and `make gtk` both invoke `make schemas` automatically.
 
 ### Reloading Code
 
@@ -60,6 +113,8 @@ restart GNOME Shell:
 
 - **Devkit**: close and relaunch the nested session
 - **Real session**: log out and back in
+- **GTK test app**: just `make gtk` again — the app reloads from
+  scratch every time
 
 **NEVER run `killall -HUP gnome-shell` on Wayland** — it causes a
 black screen requiring a full reboot.
@@ -69,24 +124,39 @@ black screen requiring a full reboot.
 Unit tests can be run outside GNOME Shell:
 
 ```sh
-make test                           # run all tests
-gjs -m tests/test-recorder.js      # VOSK/Whisper parsing tests
-gjs -m tests/test-ai.js            # AICleanup + OllamaCleanup tests
-gjs -m tests/test-keybinding.js    # keybinding state machine tests
-gjs -m tests/test-ollama.js        # standalone Ollama integration test
+make test                              # run all tests at once
+gjs -m tests/test-ai.js                # AICleanup + OllamaCleanup
+gjs -m tests/test-controller.js        # DictationController orchestration
+gjs -m tests/test-keybinding.js        # keybinding state machine
+gjs -m tests/test-session-log.js       # SessionLog write/parse/recover
+gjs -m tests/test-recorder-watchdog.js # recorder.stop() watchdog
+gjs -m tests/test-file-transcribe.js   # FileTranscriber NDJSON parser
+gjs -m tests/test-ai-integration.js    # AI session vs mock HTTP server
+gjs -m tests/test-ollama.js            # standalone Ollama smoke test
 ```
 
 The output module (`St.Clipboard`, `Clutter.VirtualInputDevice`)
 cannot be tested outside GNOME Shell — those APIs only exist inside
-the compositor process.
+the compositor process. Same for the UI modules
+(`ui/recordingOverlay.js`, `ui/transcriptDialog.js`,
+`ui/recoveryDialog.js`, `ui/pathPromptDialog.js`,
+`ui/panelIcon.js`).
+
+`tests/test-recorder.js` is currently disabled — it tested
+internal recorder methods (`_parseVoskJson`, `_parseWhisperMessage`,
+`_sttPipeline`) that no longer exist after parsing was moved into
+`stt-subprocess.js`. Re-enabling it would require rewriting the
+tests to drive the subprocess IPC instead.
 
 ### Viewing Logs
 
 ```sh
 # Real session
 journalctl --user -f -g Speakeasy
+# (or: make logs)
 
 # Devkit session — logs print directly to terminal
+# GTK test app — logs print directly to terminal
 ```
 
 ## GJS/GNOME Shell API Gotchas

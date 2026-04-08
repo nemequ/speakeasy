@@ -36,12 +36,6 @@ schemas:
 	glib-compile-schemas $(SCHEMA_DIR)
 
 ## Run all tests.
-##
-## test-recorder.js is currently disabled — it tests recorder internals
-## (_parseVoskJson, _parseWhisperMessage, _sttPipeline) that no longer
-## exist after the recorder was refactored to delegate parsing to the
-## STT subprocess. Re-enable once the test is updated to drive the
-## subprocess IPC instead.
 test:
 	gjs -m tests/test-ai.js
 	gjs -m tests/test-keybinding.js

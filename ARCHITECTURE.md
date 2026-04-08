@@ -21,56 +21,165 @@ by GNOME Shell's GJS runtime.
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │             Speakeasy Extension (GJS/ESM)                  │  │
 │  │                                                            │  │
-│  │  extension.js ──┬── keybinding.js  (state machine)         │  │
-│  │                 ├── recorder.js    (IPC to subprocess)     │  │
-│  │                 ├── ai.js          (Anthropic API)         │  │
-│  │                 ├── ollama.js      (Ollama local AI)       │  │
-│  │                 ├── output.js      (clipboard paste)       │  │
-│  │                 ├── ui/panelIcon.js        (panel icon)    │  │
-│  │                 └── ui/recordingOverlay.js (overlay)       │  │
-│  └──────────────────────────┬─────────────────────────────────┘  │
-│                             │                                    │
-│  Uses: GStreamer, Soup3, St, Clutter, Meta, Shell                │
-└──────────┬──────────────────┼──────────────┬─────────────────────┘
-           │                  │              │
-           │    ┌─────────────▼───────────┐  │
-           │    │  stt-subprocess.js      │  │
-           │    │  (GStreamer + VOSK)      │  │
-           │    │  runs out-of-process     │  │
-           │    └─────────────────────────┘  │
-           │                                 │
-    PulseAudio/      Anthropic / Ollama   Focused App
-    PipeWire         API (HTTPS)          (paste target)
-    (microphone)
+│  │  extension.js  (Shell integration: panel, overlay,         │  │
+│  │   │             notifications, keybinding, idle inhibit,   │  │
+│  │   │             recovery menu/UI)                          │  │
+│  │   │                                                        │  │
+│  │   ├── controller.js   (DictationController — portable      │  │
+│  │   │                    orchestration: recorder + AI +      │  │
+│  │   │                    output + sessionLog + transcript)   │  │
+│  │   ├── keybinding.js   (push-to-talk state machine)         │  │
+│  │   ├── recorder.js     (IPC to STT subprocess + watchdog)   │  │
+│  │   ├── sessionLog.js   (crash-safe per-session JSONL log)   │  │
+│  │   ├── ai.js           (Anthropic API)                      │  │
+│  │   ├── ollama.js       (Ollama local AI)                    │  │
+│  │   ├── output.js       (clipboard paste)                    │  │
+│  │   ├── fileTranscribe.js (recover-from-audio subprocess)    │  │
+│  │   ├── ui/panelIcon.js          (panel icon)                │  │
+│  │   ├── ui/recordingOverlay.js   (overlay)                   │  │
+│  │   ├── ui/transcriptDialog.js   (history)                   │  │
+│  │   ├── ui/recoveryDialog.js     (recovery progress)         │  │
+│  │   └── ui/pathPromptDialog.js   (no-picker fallback)        │  │
+│  └──────────┬───────────────────────────────────────┬─────────┘  │
+│             │                                       │            │
+│  Uses: GStreamer, Soup3, St, Clutter, Meta, Shell  │            │
+└─────────────┼──────────────┬────────────────────────┼────────────┘
+              │              │                        │
+   ┌──────────▼──────────┐   │   ┌──────────────────▼──────────┐
+   │ stt-subprocess.js   │   │   │ tools/transcribe-file.js    │
+   │ (GStreamer + VOSK)  │   │   │ (one-shot file→text via     │
+   │ live recording      │   │   │  same VOSK pipeline; driven │
+   │ subprocess          │   │   │  by fileTranscribe.js)      │
+   └─────────────────────┘   │   └─────────────────────────────┘
+              │              │              │
+       PulseAudio /     Anthropic /    Focused App
+       PipeWire         Ollama API     (paste target)
+       (microphone)     (HTTPS)
+
+Standalone development entry point:
+
+   gtk-app.js  ── drives the same DictationController (and the
+                  same recorder/ai/sessionLog modules) from a
+                  Gtk.Application window. Used to debug the
+                  pipeline outside the compositor.
 ```
 
 ## Component Details
 
-### extension.js — Orchestrator
+### extension.js — Shell Integration Layer
 
-The main entry point. Extends GNOME Shell's `Extension` class. Its
-`enable()` method creates all components and wires them together; its
-`disable()` tears everything down.
+The Shell extension entry point. Extends GNOME Shell's `Extension`
+class. Its `enable()` method creates all components and wires them
+together; its `disable()` tears everything down.
 
-**Key wiring:**
+After the controller refactor, `extension.js` does NOT own the
+recording lifecycle directly. Its job is to:
 
-1. `recorder.onFinalText()` → `ai.feedText()` — STT segments feed
-   the AI buffer during recording
-2. `keybinding.onCommitRecording()` → `ai.beginSession()` — when
-   we're confident this is a real recording (not accidental), warm
-   the AI prompt cache
-3. `keybinding.onStopRecording()` → `_stopRecording()` — stop
-   recorder, finalize AI, paste result
-4. `keybinding.onDiscardRecording()` → `_discardRecording()` — stop
-   recorder, cancel AI, delete audio, no output
-5. `panelIcon.onToggleRecording()` — click-to-start/stop bypass for
-   the keybinding state machine
+1. Construct and configure the per-session components: recorder, AI
+   backend, output, and the **DictationController**
+2. Wire the controller's callbacks (`onStateChanged`,
+   `onPartialText`, `onFinalText`, `onLevel`, `onTranscript`,
+   `onError`) to the Shell-only UI surfaces (panel icon, recording
+   overlay, notifications, idle inhibit)
+3. Wire the keybinding state machine to the controller:
+   - `keybinding.onStartRecording()` → `controller.start()`
+   - `keybinding.onCommitRecording()` → `controller.commit()`
+   - `keybinding.onStopRecording()` → `controller.stop()`
+   - `keybinding.onDiscardRecording()` → `controller.discard()`
+4. Run `SessionLog.recoverOrphans()` on enable to convert any
+   leftover crash-time `.jsonl` files into recovery transcripts
+5. Implement the recovery flow: file picker (zenity / kdialog /
+   inline `PathPromptDialog` fallback) → `RecoveryDialog` driven by
+   a `FileTranscriber` subprocess → `controller.saveTranscript()`
+   on Save → optional AI cleanup pass on an isolated AI instance
+6. Queue a pending start across stop-watchdog respawns so a
+   trigger press during the ~1.5s subprocess relaunch isn't lost
 
 **Verbose logging** (`verbose-logging` GSettings key): when enabled,
 the chattier per-event log lines are emitted (state transitions,
 individual STT segments, AI request internals). Visible via
-`journalctl --user -g Speakeasy`. Audio retention is now controlled
+`journalctl --user -g Speakeasy`. Audio retention is controlled
 separately by the `retain-audio` setting.
+
+### controller.js — DictationController (portable orchestration)
+
+A portable class that owns the entire dictation pipeline below the
+UI layer. Imports only `GLib` and `Gio` — no `St`, `Clutter`,
+`Meta`, `Shell`, or `Main`. The same class drives both
+`extension.js` and the standalone `gtk-app.js`.
+
+API:
+- `start()` — open SessionLog, `recorder.start()`, transition to
+  RECORDING. Idempotent: returns false if already running.
+- `commit()` — `ai.beginSession()`. Deferred from `start()` so the
+  keybinding state machine can wait until the hold-threshold or
+  double-tap-lock is reached before warming the AI cache.
+- `stop()` — `recorder.stop()` (with watchdog), `ai.finalize()`
+  (with the catch that protects the transcript save from a hung
+  AI), `output.typeText()`, `saveTranscript()`,
+  `sessionLog.markCompleted()`. Returns the saved entry.
+- `discard()` — abort without saving.
+- `saveTranscript(rawText, cleanedText, audioPath, aiUsed)` —
+  public so the recovery UI can save through the same code path.
+- `dispose()` — release internal state.
+
+The controller owns the per-session `SessionLog` instance and
+calls `sessionLog.appendFinal(text)` on every recorder final
+event **before** anything else can throw, so the .jsonl file is
+always at least one final ahead of any subsequent failure.
+
+### sessionLog.js — Crash-Safe Per-Session Log
+
+Records every committed STT final segment to a JSON Lines file as
+it lands, with a flush after each line. Lifecycle:
+
+- `start({audioPath, uuid})` writes a `start` record and flushes
+- `appendFinal(text)` writes a `final` record and flushes (called
+  from the controller's recorder onFinal callback)
+- `stop({rawText, cleanedText, aiUsed})` writes a `stop` record
+- `markCompleted()` moves the file from `sessions/` into
+  `sessions/completed/` to signal a clean finalization
+
+On extension enable, `recoverOrphans()` scans `sessions/` for
+files that were never moved into `completed/` (because the parent
+hung or crashed before `markCompleted` ran), parses them with
+tolerance for torn trailing lines, and writes one
+`transcript-*-recovered.json` per orphan into the transcripts
+directory. The orphan log itself is then moved to `completed/`
+so it isn't recovered again next time.
+
+This is the first line of defence against the stop-path hang
+that lost a long dictation session before the watchdog and
+session log were added — even if the AI/output/save chain dies
+for any reason, the user's already-committed words are on disk.
+
+### fileTranscribe.js + tools/transcribe-file.js — Recover from File
+
+The recovery flow runs an existing audio file through the same
+VOSK pipeline as the live recorder. The transcription itself
+**must** run in a separate process (loading VOSK in-process would
+spike gnome-shell's RSS by ~6 GB and block the main loop for
+minutes).
+
+- `tools/transcribe-file.js` is a standalone gjs CLI tool
+  (`filesrc → decodebin → bounded queue → vosk → fakesink`). It
+  has two output modes: human-readable text (used by the rescue
+  shell script and `make`-driven runs) and `--json-events` mode
+  which emits NDJSON on stdout (`loading` / `ready` / `progress`
+  / `partial` / `final` / `done` / `error`) for programmatic
+  consumers.
+
+- `fileTranscribe.js` is the in-process driver. It spawns
+  `transcribe-file.js --json-events` as a `Gio.Subprocess`,
+  parses the NDJSON event stream, and dispatches each event to
+  per-event callbacks. Used by the recovery flow in
+  `extension.js` and the recovery button in `gtk-app.js`.
+
+The bounded queue between `decodebin` and `vosk` is critical:
+without it the unbounded version OOM-killed at 6 GB on a 54-min
+file. The model path is passed explicitly from the live
+`Recorder.getModelPath()` so the subprocess uses the same model
+the live recorder is using.
 
 ### keybinding.js — Push-to-Talk State Machine
 
@@ -154,6 +263,42 @@ in parallel with recording.
 communicates with `stt-subprocess.js` via JSON lines over
 stdin/stdout. The subprocess runs GStreamer pipelines out-of-process
 to avoid blocking the compositor.
+
+#### Stop Watchdog
+
+`recorder.stop()` is wrapped in a watchdog timer (default 10s,
+configured by the `recorder-stop-timeout-secs` GSettings key). If
+the subprocess does not respond with a `stopped` event in time,
+the parent:
+
+1. Synthesizes the stop result from `_accumulatedText` (every
+   final segment received via the live event stream)
+2. Resolves the stop promise so the controller's
+   `_stopInner` can run AI cleanup, output, and transcript save
+3. SIGKILLs the wedged subprocess via
+   `Gio.Subprocess.force_exit()`
+4. Schedules a fresh subprocess respawn in `GLib.idle_add` so the
+   next recording works without an explicit `init()` call
+
+This was added in response to a real incident: VOSK's
+`current-final-results` flush wedged in a busy loop on a long
+single-utterance recording, the parent's `recorder.stop()` blocked
+forever, and the user's 54-minute dictation session was nearly
+lost. The crash-safe session log recovers the data; the watchdog
+ensures the system also recovers the running state.
+
+The same recovery path runs from the existing `wait_async` exit
+handler so a subprocess crash mid-stop also synthesizes from
+accumulated finals (instead of resolving with empty text as it
+used to).
+
+`Recorder.isRespawning()` returns true between the watchdog kill
+and the new subprocess sending its `ready` event. The Shell
+extension checks this in `_startRecording`: if the user presses
+the trigger key during the respawn window, the start is queued
+in `_pendingStartAfterRespawn` and fired by the recorder's
+`onReady` callback when the new subprocess is ready, so the
+trigger press isn't lost.
 
 #### The Core Problem: Mic Privacy
 
@@ -472,19 +617,24 @@ User presses key
 keybinding.js: IDLE → RECORDING
     │
     ├── extension.js: _startRecording()
-    │       recorder.start() → capture pipeline created
+    │       controller.start():
+    │         recorder.start() → capture pipeline created
+    │         sessionLog.start({audioPath, uuid}) → JSONL header
     │
     │   [user holds key — commit detected]
     │
     ├── keybinding.js: fires onCommitRecording
-    │       extension.js → ai.beginSession()
+    │       controller.commit():
+    │         ai.beginSession()
     │           → HTTP POST (framing message, max_tokens=1)
     │           → system prompt cached
     │
     │   [user speaks — VOSK produces text segments]
     │
-    ├── recorder → onFinalText(segment)
-    │       extension.js → ai.feedText(segment)
+    ├── recorder → controller's onFinal callback:
+    │       sessionLog.appendFinal(text)  ← hits disk + flush
+    │       ai.feedText(text)
+    │       extension.js dispatches onFinalText to overlay
     │       [every 30s: ai flushes buffer as intermediate turn]
     │
     │   [user releases key — release detected via gap timeout]
@@ -492,18 +642,27 @@ keybinding.js: IDLE → RECORDING
     ▼
 keybinding.js: RECORDING → PROCESSING
     │
-    ├── extension.js: _stopRecording()
+    ├── extension.js: _stopRecording() → controller.stop()
     │       recorder.stop() → returns accumulated text
+    │           (watchdog races: SIGKILL + synthesize from
+    │            accumulated finals if subprocess wedges)
     │       ai.finalize() → HTTP POST (remaining text + UUID)
-    │           → streams SSE response
-    │           → returns cleaned text
+    │           → streams SSE response (bounded by request timeout)
+    │           → returns cleaned text  (or throws on timeout —
+    │             caught, falls through to raw text)
     │       output.typeText(cleanedText)
     │           → clipboard set
     │           → Shift+Insert synthesized
     │           → clipboard restored
+    │       sessionLog.stop({rawText, cleanedText, aiUsed})
+    │       saveTranscript(...) → transcript-*.json on disk
+    │       sessionLog.markCompleted() → moved to completed/
+    │       (audio file deleted unless retain-audio is set)
     │
     ▼
-keybinding.js: PROCESSING → IDLE
+controller.js: PROCESSING → IDLE
+extension.js: onStateChanged(IDLE) →
+    keybinding.processingDone(), overlay.close(), uninhibitIdle()
 ```
 
 ### Recording Session (without AI)
@@ -512,9 +671,62 @@ keybinding.js: PROCESSING → IDLE
 [same as above through recording]
     │
     ▼
-extension.js: _stopRecording()
-    │   ai.isAvailable() → false
+controller.stop()
+    │   ai.isAvailable() → false (or commit() never called)
     │   output.typeText(rawSttText)
+    │   sessionLog.stop({rawText, cleanedText:rawText, aiUsed:false})
+    │   saveTranscript(...)
+    │   sessionLog.markCompleted()
     ▼
-keybinding.js: PROCESSING → IDLE
+controller: PROCESSING → IDLE
 ```
+
+### Recovery from Audio File
+
+```
+User clicks panel icon → "Recover from Audio File..."
+    │
+    ▼
+extension._recoverFromAudioFile()
+    │   _pickAudioFile() — tries zenity → kdialog → PathPromptDialog
+    │
+    ▼
+extension._startRecovery(audioPath)
+    │   new RecoveryDialog({audioPath, onSave, onCancel})
+    │   new FileTranscriber({extensionDir, modelPath, callbacks})
+    │   transcriber.start(audioPath, null)
+    │       → spawns `gjs tools/transcribe-file.js --json-events`
+    │       → parses NDJSON events:
+    │           loading → dialog.onLoading()
+    │           ready → dialog.onReady()
+    │           progress → dialog.onProgress({pos, dur, finals})
+    │           partial → dialog.onPartial(text)
+    │           final → dialog.onFinal(text)
+    │           done → dialog.onDone({raw_text, finals_count})
+    │           error → dialog.onError(message)
+    │
+    │   [user clicks Save]
+    │
+    ▼
+extension._saveRecoveredTranscript(audioPath, rawText, doneInfo)
+    │   controller.saveTranscript(rawText, rawText, audioPath, false)
+    │       → transcript-*.json on disk with recovered: true
+    │   _runRecoveryAiCleanup(entry, audioPath, rawText)
+    │       → spawns ISOLATED AI instance (won't collide with a
+    │         live dictation session in progress)
+    │       → ai.beginSession() → feedText() → finalize()
+    │       → rewrites the saved JSON with the cleaned text
+    │       → destroys the isolated AI instance
+```
+
+### Standalone GTK Test App
+
+`gtk-app.js` is a regular `Gtk.Application` that constructs the
+same `Recorder`, `AICleanup`/`OllamaCleanup`, and
+`DictationController` as the Shell extension, but with a
+`TextViewOutput` (which appends cleaned text to a Gtk.TextView)
+instead of the Shell's clipboard+virtual-keyboard `Output`. It
+exists solely to debug the dictation pipeline outside the
+compositor — Wayland forces a logout/login to reload extension JS,
+which is painful to iterate against. The GTK app reloads every
+time you `make gtk`.
