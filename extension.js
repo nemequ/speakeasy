@@ -19,6 +19,7 @@ import {FileTranscriber} from './fileTranscribe.js';
 import {PanelIcon} from './ui/panelIcon.js';
 import {TranscriptDialog} from './ui/transcriptDialog.js';
 import {RecoveryDialog} from './ui/recoveryDialog.js';
+import {PathPromptDialog} from './ui/pathPromptDialog.js';
 import {RecordingOverlay} from './ui/recordingOverlay.js';
 
 // SessionManager inhibit flags
@@ -746,33 +747,81 @@ export default class SpeakeasyExtension extends Extension {
      * Recover a transcript from an existing audio file.
      *
      * Flow:
-     *   1. Spawn `zenity --file-selection` to pick the file. We use
-     *      zenity because gnome-shell can't host a Gtk file picker
-     *      cleanly from inside the compositor process.
+     *   1. Pick the audio file using whichever picker is available.
+     *      We try zenity first, then kdialog, then fall back to a
+     *      manual path-entry dialog so the recovery flow always
+     *      works regardless of which file pickers are installed.
+     *      (gnome-shell can't host a Gtk.FileDialog cleanly from
+     *      inside the compositor process — that's why we shell out.)
      *   2. Open a RecoveryDialog and start a FileTranscriber.
      *   3. As events arrive from the subprocess, update the dialog.
      *   4. On done, the user clicks Save, which calls back here to
      *      save the transcript JSON via the controller's
-     *      saveTranscript() helper. AI cleanup is run in the
-     *      background after save (if AI is configured) and the
+     *      saveTranscript() helper. AI cleanup runs in the
+     *      background on an isolated AI instance and the
      *      transcript is updated in place.
      */
     _recoverFromAudioFile() {
         const audioDir = GLib.build_filenamev([
             GLib.get_user_data_dir(), 'speakeasy', 'audio',
         ]);
-        // Make sure the dir exists so zenity opens there even if the
-        // user has never retained any audio.
+        // Make sure the dir exists so the picker opens there even
+        // if the user has never retained any audio.
         try { GLib.mkdir_with_parents(audioDir, 0o755); } catch (_e) { /* ignore */ }
 
-        const argv = [
-            'zenity', '--file-selection',
-            `--filename=${audioDir}/`,
-            '--title=Choose audio file to transcribe',
-            '--file-filter=Audio files (opus, wav, mp3, flac, ogg, m4a) | *.opus *.wav *.mp3 *.flac *.ogg *.m4a',
-            '--file-filter=All files | *',
-        ];
+        this._pickAudioFile(audioDir, (path) => {
+            if (path)
+                this._startRecovery(path);
+        });
+    }
 
+    /**
+     * File picker fallback chain.  Tries each picker in order;
+     * the first one whose binary is on PATH is used. The very
+     * last fallback is an in-Shell prompt that asks the user to
+     * paste a path. Calls the callback with the chosen absolute
+     * path, or null if the user cancelled / no path was provided.
+     *
+     * @param {string} initialDir
+     * @param {function(string|null)} callback
+     */
+    _pickAudioFile(initialDir, callback) {
+        const audioExts = ['opus', 'wav', 'mp3', 'flac', 'ogg', 'm4a'];
+
+        // Try zenity first.
+        if (GLib.find_program_in_path('zenity')) {
+            this._spawnPickerProcess([
+                'zenity', '--file-selection',
+                `--filename=${initialDir}/`,
+                '--title=Choose audio file to transcribe',
+                `--file-filter=Audio files | ${audioExts.map(e => `*.${e}`).join(' ')}`,
+                '--file-filter=All files | *',
+            ], callback);
+            return;
+        }
+
+        // Then kdialog.
+        if (GLib.find_program_in_path('kdialog')) {
+            const filter = `${audioExts.map(e => `*.${e}`).join(' ')}|Audio files\n*|All files`;
+            this._spawnPickerProcess([
+                'kdialog', '--getopenfilename',
+                `${initialDir}/`,
+                filter,
+                '--title', 'Choose audio file to transcribe',
+            ], callback);
+            return;
+        }
+
+        // No external picker available — prompt for a path inline.
+        log('Speakeasy: no zenity/kdialog found, prompting for path manually');
+        this._promptForPathInline(initialDir, callback);
+    }
+
+    /**
+     * Spawn a child picker process, parse its stdout as a single
+     * absolute path, and call the callback with the result.
+     */
+    _spawnPickerProcess(argv, callback) {
         let proc;
         try {
             proc = new Gio.Subprocess({
@@ -782,8 +831,9 @@ export default class SpeakeasyExtension extends Extension {
             });
             proc.init(null);
         } catch (e) {
-            log(`Speakeasy: failed to launch zenity: ${e.message}`);
-            this._notify('Could not open file picker (is zenity installed?).');
+            log(`Speakeasy: failed to launch ${argv[0]}: ${e.message}`);
+            // Fall through to inline prompt
+            this._promptForPathInline(null, callback);
             return;
         }
 
@@ -792,18 +842,38 @@ export default class SpeakeasyExtension extends Extension {
             try {
                 [success, stdout] = p.communicate_utf8_finish(result);
             } catch (e) {
-                log(`Speakeasy: zenity communicate failed: ${e.message}`);
+                log(`Speakeasy: ${argv[0]} communicate failed: ${e.message}`);
+                callback(null);
                 return;
             }
             if (!success || p.get_exit_status() !== 0) {
-                // User cancelled or zenity failed; nothing to do.
+                callback(null);
                 return;
             }
             const path = (stdout || '').trim();
-            if (!path)
-                return;
-            this._startRecovery(path);
+            callback(path || null);
         });
+    }
+
+    /**
+     * Last-resort fallback: open the in-Shell PathPromptDialog
+     * (an St-based modal with a single editable text entry). Used
+     * when neither zenity nor kdialog is available so the recovery
+     * flow can always be reached.
+     */
+    _promptForPathInline(initialDir, callback) {
+        log('Speakeasy: no zenity/kdialog found; opening inline path prompt');
+        const dialog = new PathPromptDialog({
+            title: 'Recover from Audio File',
+            message: 'Type or paste the absolute path of an audio ' +
+                'file (.opus, .wav, .mp3, .flac, .ogg, .m4a) to ' +
+                'transcribe. Install zenity or kdialog for a real ' +
+                'file picker.',
+            initialPath: initialDir ? `${initialDir}/` : '',
+            onAccept: (path) => callback(path || null),
+            onCancel: () => callback(null),
+        });
+        dialog.open();
     }
 
     /**
