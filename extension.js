@@ -13,8 +13,12 @@ import {KeybindingManager, State} from './keybinding.js';
 import {Output} from './output.js';
 import {AICleanup} from './ai.js';
 import {OllamaCleanup} from './ollama.js';
+import {recoverOrphans} from './sessionLog.js';
+import {DictationController, ControllerState} from './controller.js';
+import {FileTranscriber} from './fileTranscribe.js';
 import {PanelIcon} from './ui/panelIcon.js';
 import {TranscriptDialog} from './ui/transcriptDialog.js';
+import {RecoveryDialog} from './ui/recoveryDialog.js';
 import {RecordingOverlay} from './ui/recordingOverlay.js';
 
 // SessionManager inhibit flags
@@ -82,20 +86,10 @@ export default class SpeakeasyExtension extends Extension {
             this._discardRecording();
         });
 
-        // Wire recorder callbacks — partial/final text goes to both
-        // the panel icon and the recording overlay; level events go
-        // to the overlay waveform; final text is also fed to the AI.
-        this._recorder.onPartialText((text) => {
-            this._panelIcon.setPartialText(text);
-            this._overlay.setPartialText(text);
-        });
-        this._recorder.onFinalText((text) => {
-            this._ai.feedText(text);
-            this._overlay.addFinalText(text);
-        });
-        this._recorder.onLevel((rms, peak) => {
-            this._overlay.setLevel(rms, peak);
-        });
+        // The DictationController owns the recorder/AI/output
+        // callbacks; we wire it up after the session log recovery
+        // below. The only recorder callback set here is onReady,
+        // which is purely cosmetic logging.
         this._recorder.onReady(() => {
             log(`Speakeasy: STT subprocess ready (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms from enable start)`);
         });
@@ -109,11 +103,26 @@ export default class SpeakeasyExtension extends Extension {
         }
         log(`Speakeasy:   subprocess spawned (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
 
-        // Verbose-logging toggle. Currently still doubles as the
-        // audio-retention switch until Phase 2 introduces the dedicated
-        // 'retain-audio' key.
+        // Verbose logging (extra log lines, no behavioral effect).
         this._verboseLogging = this._settings.get_boolean('verbose-logging');
+        // Audio retention (independent of verbose-logging).
+        this._retainAudio = this._settings.get_boolean('retain-audio');
         this._transcriptDir = this._settings.get_string('transcript-dir');
+
+        // Recover any orphan session logs left behind by a previous
+        // hung/killed session. The controller's per-session log is
+        // owned by the controller and created on each start().
+        try {
+            const recovered = recoverOrphans(null, this._getTranscriptDir());
+            if (recovered.length > 0) {
+                log(`Speakeasy: recovered ${recovered.length} orphan session log(s)`);
+                for (const r of recovered) {
+                    log(`Speakeasy:   recovered ${r.source} (complete=${r.complete}) -> ${r.transcript}`);
+                }
+            }
+        } catch (e) {
+            log(`Speakeasy: orphan recovery failed (non-fatal): ${e.message}`);
+        }
 
         // Transcript history — loaded from disk so it survives lock/unlock.
         // Loaded asynchronously to avoid blocking the compositor main loop.
@@ -121,6 +130,46 @@ export default class SpeakeasyExtension extends Extension {
         this._transcripts = [];
         this._loadTranscriptsFromDiskAsync();
         log(`Speakeasy:   transcript load queued (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
+
+        // Build the portable dictation controller. It owns the
+        // recorder/AI/output orchestration, the per-session log,
+        // and the transcript save. The Shell extension just wires
+        // its UI (panel icon, overlay, notifications, idle inhibit)
+        // to the controller's callbacks.
+        this._controller = new DictationController({
+            recorder: this._recorder,
+            ai: this._ai,
+            output: this._output,
+            settings: this._settings,
+            onStateChanged: (state) => {
+                if (state === ControllerState.RECORDING)
+                    this._overlay?.open('recording');
+                else if (state === ControllerState.PROCESSING)
+                    this._overlay?.setMode('processing');
+                else if (state === ControllerState.IDLE) {
+                    this._keybinding?.processingDone();
+                    this._overlay?.close();
+                    this._uninhibitIdle();
+                }
+            },
+            onPartialText: (text) => {
+                this._panelIcon?.setPartialText(text);
+                this._overlay?.setPartialText(text);
+            },
+            onFinalText: (text) => {
+                this._overlay?.addFinalText(text);
+            },
+            onLevel: (rms, peak) => {
+                this._overlay?.setLevel(rms, peak);
+            },
+            onTranscript: (entry) => {
+                if (this._transcripts) {
+                    this._transcripts.push(entry);
+                    this._trimTranscripts();
+                }
+            },
+            onError: (msg) => this._notify(msg),
+        });
 
         // Create keybinding manager with settings for timing parameters
         this._keybinding = new KeybindingManager({
@@ -136,7 +185,7 @@ export default class SpeakeasyExtension extends Extension {
 
         // Handle commit (hold confirmed or double-tap locked) — begin AI session
         this._keybinding.onCommitRecording(() => {
-            this._ai.beginSession();
+            this._controller.commit();
         });
 
         // Listen for settings changes
@@ -151,6 +200,12 @@ export default class SpeakeasyExtension extends Extension {
             this._settings.connect('changed::verbose-logging', () => {
                 this._verboseLogging = this._settings.get_boolean('verbose-logging');
                 log(`Speakeasy: verbose logging ${this._verboseLogging ? 'enabled' : 'disabled'}`);
+            })
+        );
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::retain-audio', () => {
+                this._retainAudio = this._settings.get_boolean('retain-audio');
+                log(`Speakeasy: audio retention ${this._retainAudio ? 'enabled' : 'disabled'}`);
             })
         );
         this._settingsChangedIds.push(
@@ -171,16 +226,14 @@ export default class SpeakeasyExtension extends Extension {
             })
         );
 
-        // Wire up the toggle switch for click-to-record
+        // Wire up the toggle switch for click-to-record. Toggle
+        // implies an intentional recording, so we commit immediately.
         this._panelIcon.onToggleRecording((active) => {
             if (active) {
-                // Start recording via toggle (bypass keybinding state machine)
                 this._keybinding.forceState(State.RECORDING);
                 this._startRecording();
-                // Toggle implies intentional recording — begin AI session immediately
-                this._ai.beginSession();
+                this._controller.commit();
             } else {
-                // Stop recording via toggle
                 this._keybinding.forceState(State.PROCESSING);
                 this._stopRecording();
             }
@@ -188,6 +241,9 @@ export default class SpeakeasyExtension extends Extension {
 
         // Wire up "Show Transcripts" menu item
         this._panelIcon.onShowTranscripts(() => this._showTranscripts());
+
+        // Wire up "Recover from Audio File..." menu item
+        this._panelIcon.onRecoverFromFile(() => this._recoverFromAudioFile());
 
         // Wire up "Preferences" menu item
         this._panelIcon.onShowPreferences(() => this._openPreferences());
@@ -285,6 +341,20 @@ export default class SpeakeasyExtension extends Extension {
             this._overlay = null;
         }
 
+        // The DictationController owns the session log; dispose()
+        // closes it without marking it completed, so the next
+        // enable() recovers it as an orphan.
+        if (this._controller) {
+            this._controller.dispose();
+            this._controller = null;
+        }
+
+        // Cancel any in-flight recovery transcription.
+        if (this._activeTranscriber) {
+            try { this._activeTranscriber.cancel(); } catch (_e) { /* ignore */ }
+            this._activeTranscriber = null;
+        }
+
         this._transcripts = null;
         this._settings = null;
         this._pendingStop = null;
@@ -337,6 +407,10 @@ export default class SpeakeasyExtension extends Extension {
         this._ai.setExtensionDir(this.path);
         this._ai.setSettings(this._settings);
         this._ai.init();
+
+        // Push the new backend into the controller (it may have been
+        // constructed with the previous one).
+        this._controller?.setAi(this._ai);
     }
 
     // ─── Idle inhibit ─────────────────────────────────────────────────
@@ -450,179 +524,44 @@ export default class SpeakeasyExtension extends Extension {
     }
 
     // ─── Recording lifecycle ──────────────────────────────────────────
+    //
+    // The actual orchestration (recorder + AI + output + session log
+    // + transcript save) lives in DictationController. These methods
+    // are thin wrappers that handle the Shell-only side effects:
+    // idle inhibit, fallback notifications, and tracking the in-flight
+    // stop promise so disable() can wait for it.
 
-    /**
-     * Called when recording should start (from keybinding or toggle).
-     */
     _startRecording() {
         log('Speakeasy: starting recording');
-
-        if (!this._recorder.isReady()) {
-            log('Speakeasy: STT model still loading');
-            this._notify('STT model still loading, please wait.');
-            this._keybinding.forceState(State.IDLE);
-            return;
-        }
-
         this._inhibitIdle();
-        const started = this._recorder.start();
+        const started = this._controller.start();
         if (!started) {
-            log('Speakeasy: failed to start recording');
             this._uninhibitIdle();
-            this._notify('Failed to start recording. Check STT model.');
-            // Force back to IDLE regardless of current state
             this._keybinding.forceState(State.IDLE);
-        } else {
-            // Show the overlay in recording state
-            this._overlay.open('recording');
         }
     }
 
-    /**
-     * Called by the keybinding manager when recording should stop.
-     * Pipeline: recorder.stop() → ai.finalize() → stream to wtype.
-     *
-     * Audio is retained on disk until we know the transcription succeeded.
-     * On AI failure, the audio file is kept and the user is notified.
-     */
     async _stopRecording() {
         log('Speakeasy: stopping recording');
-
-        // Snapshot resources we need -- disable() may null them while we're async.
-        const recorder = this._recorder;
-        const ai = this._ai;
-        const output = this._output;
-        const settings = this._settings;
-        // TODO Phase 2: replace with retain-audio
-        const retainAudio = this._verboseLogging;
-
-        const audioPath = recorder.getAudioPath();
-        const rawText = await recorder.stop();
-
-        // Show overlay in processing state
-        this._overlay.setMode('processing');
-
-        // Track this async operation so disable() can wait for it.
-        const stopPromise = this._stopRecordingInner(
-            rawText, audioPath, recorder, ai, output, settings, retainAudio);
+        const stopPromise = this._controller.stop();
         this._pendingStop = stopPromise;
         try {
             await stopPromise;
         } finally {
             if (this._pendingStop === stopPromise)
                 this._pendingStop = null;
+            // Idle uninhibit is also fired by the controller's
+            // onStateChanged(IDLE) callback; this is a belt-and-
+            // suspenders extra in case the state callback was
+            // missed (e.g. controller already disposed).
             this._uninhibitIdle();
         }
     }
 
-    /**
-     * Inner implementation of _stopRecording, using only snapshot
-     * references so it survives disable() tearing down this._*.
-     */
-    async _stopRecordingInner(rawText, audioPath, recorder, ai, output, settings, retainAudio) {
-        if (!rawText || rawText.trim() === '') {
-            log('Speakeasy: no text recognized');
-            this._notify('No speech detected.');
-            recorder.deleteAudio();
-            ai.cancelSession();
-            this._keybinding?.processingDone();
-            this._overlay?.close();
-            return;
-        }
-
-        log(`Speakeasy: raw STT text: "${rawText}"`);
-
-        // AI cleanup
-        let textToOutput = rawText;
-        let aiUsed = false;
-
-        if (!ai.isAvailable()) {
-            const backend = settings?.get_string('ai-backend') ?? '?';
-            const debugInfo = ai.getDebugInfo?.() ?? {};
-            const details = Object.entries(debugInfo)
-                .map(([k, v]) => `${k}=${v}`)
-                .join(', ');
-            log(`Speakeasy: AI cleanup unavailable — outputting raw STT text ` +
-                `(backend=${backend}${details ? `, ${details}` : ''})`);
-        } else {
-            log('Speakeasy: finalizing AI session');
-            try {
-                const cleanedText = await ai.finalize(null);
-
-                if (cleanedText !== null && cleanedText.trim() !== '') {
-                    log(`Speakeasy: AI cleanup complete: "${cleanedText}"`);
-                    textToOutput = cleanedText;
-                    aiUsed = true;
-                } else {
-                    // AI returned nothing — fall through to output raw text.
-                    // No notification: the raw text is still usable and the
-                    // transcript is always saved regardless.
-                    log('Speakeasy: AI cleanup returned empty, using raw STT text');
-                }
-            } catch (e) {
-                // AI request failed — fall through to output raw text.
-                log(`Speakeasy: AI cleanup error: ${e.message}`);
-            }
-        }
-
-        // Output text — skip paste if output was destroyed (screen locked)
-        let transcriptOk = false;
-        if (textToOutput !== null) {
-            log(`Speakeasy: outputting text: "${textToOutput}"`);
-            if (output) {
-                try {
-                    const success = await output.typeText(textToOutput);
-                    transcriptOk = true;
-                    if (!success) {
-                        log('Speakeasy: output failed (paste)');
-                        this._notify(
-                            'Please activate a text input before completing recording. ' +
-                            'Transcript has been saved.');
-                    }
-                } catch (e) {
-                    // Output was destroyed mid-paste (screen lock)
-                    log(`Speakeasy: output error (likely screen lock): ${e.message}`);
-                    transcriptOk = true;  // we still have the text
-                }
-            } else {
-                // Output already destroyed — still save the transcript
-                log('Speakeasy: output unavailable (extension disabled), saving transcript only');
-                transcriptOk = true;
-            }
-        }
-
-        // Always save transcript to disk and update in-memory list.
-        // This uses only GLib/Gio, so it works even mid-teardown.
-        if (transcriptOk) {
-            const entry = this._saveTranscript(
-                rawText, textToOutput, retainAudio ? audioPath : null, aiUsed);
-            if (entry && this._transcripts)
-                this._transcripts.push(entry);
-            this._trimTranscripts();
-        }
-
-        // Audio retention: keep on disk only when the user opted in.
-        if (transcriptOk && !retainAudio) {
-            try { recorder.deleteAudio(); } catch (_e) { /* ignore */ }
-        } else if (audioPath) {
-            log(`Speakeasy: keeping audio at ${audioPath}`);
-        }
-
-        this._keybinding?.processingDone();
-        this._overlay?.close();
-    }
-
-    /**
-     * Called when a recording should be discarded (single quick tap, no follow-up).
-     * Stops the recorder, cancels any AI session, deletes audio.
-     */
     _discardRecording() {
         log('Speakeasy: discarding recording');
-        this._recorder.stop();
-        this._recorder.deleteAudio();
-        this._ai.cancelSession();
+        this._controller.discard();
         this._uninhibitIdle();
-        this._overlay?.close();
     }
 
     // ─── Transcript history ────────────────────────────────────────
@@ -803,6 +742,204 @@ export default class SpeakeasyExtension extends Extension {
         dialog.open();
     }
 
+    /**
+     * Recover a transcript from an existing audio file.
+     *
+     * Flow:
+     *   1. Spawn `zenity --file-selection` to pick the file. We use
+     *      zenity because gnome-shell can't host a Gtk file picker
+     *      cleanly from inside the compositor process.
+     *   2. Open a RecoveryDialog and start a FileTranscriber.
+     *   3. As events arrive from the subprocess, update the dialog.
+     *   4. On done, the user clicks Save, which calls back here to
+     *      save the transcript JSON via the controller's
+     *      saveTranscript() helper. AI cleanup is run in the
+     *      background after save (if AI is configured) and the
+     *      transcript is updated in place.
+     */
+    _recoverFromAudioFile() {
+        const audioDir = GLib.build_filenamev([
+            GLib.get_user_data_dir(), 'speakeasy', 'audio',
+        ]);
+        // Make sure the dir exists so zenity opens there even if the
+        // user has never retained any audio.
+        try { GLib.mkdir_with_parents(audioDir, 0o755); } catch (_e) { /* ignore */ }
+
+        const argv = [
+            'zenity', '--file-selection',
+            `--filename=${audioDir}/`,
+            '--title=Choose audio file to transcribe',
+            '--file-filter=Audio files (opus, wav, mp3, flac, ogg, m4a) | *.opus *.wav *.mp3 *.flac *.ogg *.m4a',
+            '--file-filter=All files | *',
+        ];
+
+        let proc;
+        try {
+            proc = new Gio.Subprocess({
+                argv,
+                flags: Gio.SubprocessFlags.STDOUT_PIPE |
+                       Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+            proc.init(null);
+        } catch (e) {
+            log(`Speakeasy: failed to launch zenity: ${e.message}`);
+            this._notify('Could not open file picker (is zenity installed?).');
+            return;
+        }
+
+        proc.communicate_utf8_async(null, null, (p, result) => {
+            let stdout, success;
+            try {
+                [success, stdout] = p.communicate_utf8_finish(result);
+            } catch (e) {
+                log(`Speakeasy: zenity communicate failed: ${e.message}`);
+                return;
+            }
+            if (!success || p.get_exit_status() !== 0) {
+                // User cancelled or zenity failed; nothing to do.
+                return;
+            }
+            const path = (stdout || '').trim();
+            if (!path)
+                return;
+            this._startRecovery(path);
+        });
+    }
+
+    /**
+     * Open the recovery dialog and kick off transcription of the
+     * given audio file. Pulled out of _recoverFromAudioFile so the
+     * GTK test app can call it directly with a path.
+     */
+    _startRecovery(audioPath) {
+        log(`Speakeasy: starting recovery for ${audioPath}`);
+
+        const dialog = new RecoveryDialog({
+            audioPath,
+            onSave: (rawText, doneInfo) => {
+                this._saveRecoveredTranscript(audioPath, rawText, doneInfo);
+            },
+            onCancel: () => {
+                if (this._activeTranscriber) {
+                    this._activeTranscriber.cancel();
+                    this._activeTranscriber = null;
+                }
+            },
+        });
+
+        const transcriber = new FileTranscriber({
+            extensionDir: this.path,
+            modelPath: null,  // auto-detect
+            onLoading: () => dialog.onLoading(),
+            onReady: () => dialog.onReady(),
+            onProgress: (info) => dialog.onProgress(info),
+            onPartial: (text) => dialog.onPartial(text),
+            onFinal: (text) => dialog.onFinal(text),
+            onDone: (info) => {
+                dialog.onDone(info);
+                this._activeTranscriber = null;
+            },
+            onError: (msg) => {
+                dialog.onError(msg);
+                this._activeTranscriber = null;
+            },
+        });
+
+        this._activeTranscriber = transcriber;
+        dialog.open();
+
+        if (!transcriber.start(audioPath, null)) {
+            log('Speakeasy: failed to start FileTranscriber');
+            this._activeTranscriber = null;
+        }
+    }
+
+    /**
+     * Save a recovered transcript: write the JSON, add to in-memory
+     * list, and (if AI is enabled) kick off a background cleanup
+     * pass that updates the entry when it completes.
+     */
+    _saveRecoveredTranscript(audioPath, rawText, _doneInfo) {
+        // Use the controller's saveTranscript so the JSON shape
+        // matches everywhere. We pass cleaned_text=rawText for now;
+        // the AI cleanup pass below will replace it.
+        const entry = this._controller?.saveTranscript(
+            rawText, rawText, audioPath, false);
+
+        if (!entry) {
+            log('Speakeasy: recovery save failed');
+            this._notify('Failed to save recovered transcript.');
+            return;
+        }
+
+        // Mark this entry as recovered for the UI
+        entry.recovered = true;
+
+        if (this._transcripts) {
+            this._transcripts.push(entry);
+            this._trimTranscripts();
+        }
+
+        log(`Speakeasy: recovered transcript saved at ${entry.filePath}`);
+        this._notify(`Recovered transcript saved (${rawText.length} chars).`);
+
+        // Optional AI cleanup pass — runs in the background, updates
+        // the transcript JSON and the in-memory entry when done.
+        if (this._ai && this._ai.isAvailable()) {
+            this._runRecoveryAiCleanup(entry, audioPath, rawText);
+        }
+    }
+
+    /**
+     * Run a one-shot AI cleanup pass on a recovered transcript.
+     * This is a "synthetic session" — we begin a fresh AI session,
+     * feed the entire raw text in one chunk, finalize, and then
+     * rewrite the saved transcript JSON with the cleaned text.
+     */
+    _runRecoveryAiCleanup(entry, audioPath, rawText) {
+        log(`Speakeasy: running AI cleanup on recovered transcript (${rawText.length} chars)`);
+        (async () => {
+            try {
+                await this._ai.beginSession();
+                this._ai.feedText(rawText);
+                const cleaned = await this._ai.finalize(null);
+                if (!cleaned || cleaned.trim() === '') {
+                    log('Speakeasy: AI cleanup returned empty for recovery');
+                    return;
+                }
+                log(`Speakeasy: recovery AI cleanup complete (${cleaned.length} chars)`);
+
+                // Rewrite the saved JSON with the cleaned text.
+                const updated = {
+                    timestamp: entry.timestamp,
+                    raw_text: rawText,
+                    cleaned_text: cleaned,
+                    audio_path: audioPath,
+                    ai_enabled: true,
+                    recovered: true,
+                };
+                try {
+                    const file = Gio.File.new_for_path(entry.filePath);
+                    file.replace_contents(
+                        new TextEncoder().encode(JSON.stringify(updated, null, 2)),
+                        null, false,
+                        Gio.FileCreateFlags.REPLACE_DESTINATION,
+                        null
+                    );
+                    log(`Speakeasy: recovery transcript updated with cleaned text`);
+                } catch (e) {
+                    log(`Speakeasy: failed to rewrite recovery transcript: ${e.message}`);
+                }
+
+                // Update the in-memory entry too
+                entry.cleanedText = cleaned;
+                entry.aiEnabled = true;
+            } catch (e) {
+                log(`Speakeasy: recovery AI cleanup failed: ${e.message}`);
+            }
+        })();
+    }
+
     // ─── Developer mode ──────────────────────────────────────────────
 
     /**
@@ -823,51 +960,8 @@ export default class SpeakeasyExtension extends Extension {
         return dir;
     }
 
-    /**
-     * Save a transcript JSON file to disk.
-     * Uses only GLib/Gio so it works even if the extension is mid-teardown.
-     * @param {string} rawText - Raw STT text
-     * @param {string} cleanedText - AI-cleaned text (or raw if AI unavailable)
-     * @param {string|null} audioPath - Path to the audio file, if retained
-     * @param {boolean} [aiUsed] - Whether AI cleanup was used
-     * @returns {object|null} The transcript entry (with filePath), or null on error
-     */
-    _saveTranscript(rawText, cleanedText, audioPath, aiUsed) {
-        try {
-            const dir = this._getTranscriptDir();
-            const now = new Date();
-            const tsForFile = now.toISOString().replace(/[:.]/g, '-');
-            const filename = `transcript-${tsForFile}.json`;
-            const filepath = GLib.build_filenamev([dir, filename]);
-
-            const transcript = {
-                timestamp: now.toISOString(),
-                raw_text: rawText,
-                cleaned_text: cleanedText,
-                audio_path: audioPath ?? null,
-                ai_enabled: aiUsed ?? false,
-            };
-
-            const json = JSON.stringify(transcript, null, 2);
-            const file = Gio.File.new_for_path(filepath);
-            file.replace_contents(
-                new TextEncoder().encode(json),
-                null, false,
-                Gio.FileCreateFlags.REPLACE_DESTINATION,
-                null
-            );
-
-            log(`Speakeasy: transcript saved: ${filepath}`);
-            return {
-                timestamp: transcript.timestamp,
-                rawText,
-                cleanedText,
-                aiEnabled: aiUsed ?? false,
-                filePath: filepath,
-            };
-        } catch (e) {
-            log(`Speakeasy: failed to save transcript: ${e.message}`);
-            return null;
-        }
-    }
+    // _saveTranscript was removed in the controller refactor —
+    // the DictationController.saveTranscript() method is now the
+    // single implementation, used by both the Shell extension and
+    // the standalone GTK test app.
 }
