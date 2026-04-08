@@ -11,3 +11,6 @@ __pycache__/
 *.swo
 .vscode/
 .idea/
+
+# Claude Code local state (per-user, not part of the project)
+.claude/
