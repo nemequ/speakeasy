@@ -32,6 +32,8 @@ import {OllamaCleanup} from './ollama.js';
 import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
+import {runRecoveryCleanupWithFeedback} from './recoveryCleanup.js';
+import {validateAudioPath} from './ui/pathValidation.js';
 import {openTranscriptHistoryWindow} from './ui/transcriptHistoryWindow.js';
 
 const APP_ID = 'local.speakeasy.test';
@@ -389,7 +391,21 @@ app.connect('activate', () => {
     // menu entry, just driven from the GTK app's button. Reuses the
     // same FileTranscriber class. The result is appended to the
     // result view; if AI is available it also runs a cleanup pass.
+    //
+    // Tracked so we can refuse to start a second recovery while the
+    // first one is still running (mirrors _activeTranscriber in the
+    // Shell extension). The button is grayed out while set.
+    let activeRecoveryTranscriber = null;
+
     recoverBtn.connect('clicked', () => {
+        // Defense in depth — the button should be insensitive while
+        // a recovery is in flight, but dispatch races are cheap to
+        // guard against.
+        if (activeRecoveryTranscriber) {
+            print('[gtk-app] recovery already in progress, ignoring click');
+            return;
+        }
+        recoverBtn.sensitive = false;
         const dialog = new Gtk.FileDialog({
             title: 'Choose audio file to transcribe',
         });
@@ -418,11 +434,28 @@ app.connect('activate', () => {
             try {
                 file = source.open_finish(result);
             } catch (_e) {
-                return;  // user cancelled
-            }
-            if (!file)
+                // user cancelled
+                recoverBtn.sensitive = true;
                 return;
+            }
+            if (!file) {
+                recoverBtn.sensitive = true;
+                return;
+            }
             const path = file.get_path();
+
+            // Pre-flight the path — Gtk.FileDialog usually gives us
+            // a real file but guard anyway so the error is visible
+            // in the result view rather than buried in a subprocess
+            // stderr line.
+            const {ok, error} = validateAudioPath(path);
+            if (!ok) {
+                const buffer = resultView.tv.buffer;
+                const end = buffer.get_end_iter();
+                buffer.insert(end, `[recovery error] ${error}\n`, -1);
+                recoverBtn.sensitive = true;
+                return;
+            }
             startGtkRecovery(path);
         });
     });
@@ -477,14 +510,45 @@ app.connect('activate', () => {
                     raw_text, raw_text, audioPath, false);
                 if (entry) {
                     insertHeader(`(saved to ${entry.filePath})\n`);
+                    entry.recovered = true;
+                    entry.audioPath = audioPath;
+
+                    // Kick off an AI cleanup pass if the current
+                    // backend is available. Mirrors the Shell
+                    // extension's post-save behaviour so the GTK
+                    // test app shows the cleaned text too.
+                    if (ai && ai.isAvailable && ai.isAvailable()) {
+                        runRecoveryCleanupWithFeedback(entry, ai, {
+                            onStart: () => {
+                                insertHeader('[AI cleaning recovered transcript...]\n');
+                            },
+                            onDone: (e) => {
+                                insertHeader(`[AI cleanup complete]\n--- cleaned text ---\n${e.cleanedText}\n`);
+                            },
+                            onError: (err) => {
+                                const msg = err ? err.message : 'empty result';
+                                insertHeader(`[AI cleanup failed: ${msg} — raw text kept]\n`);
+                            },
+                        });
+                    }
                 }
+
+                activeRecoveryTranscriber = null;
+                recoverBtn.sensitive = true;
             },
             onError: (msg) => {
                 stateLabel.set_markup(`<b>State:</b> recovery error`);
                 insertHeader(`[recovery error] ${msg}\n`);
+                activeRecoveryTranscriber = null;
+                recoverBtn.sensitive = true;
             },
         });
-        transcriber.start(audioPath, null);
+        activeRecoveryTranscriber = transcriber;
+        if (!transcriber.start(audioPath, null)) {
+            insertHeader('[recovery error] failed to start FileTranscriber\n');
+            activeRecoveryTranscriber = null;
+            recoverBtn.sensitive = true;
+        }
     }
 
     // Window-local F5/F6/F7 shortcuts

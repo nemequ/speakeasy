@@ -17,10 +17,12 @@ import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
 import {rerunAiCleanup as rerunAiCleanupOnEntry} from './transcriptStore.js';
+import {runRecoveryCleanupWithFeedback} from './recoveryCleanup.js';
 import {PanelIcon} from './ui/panelIcon.js';
 import {TranscriptDialog} from './ui/transcriptDialog.js';
 import {RecoveryDialog} from './ui/recoveryDialog.js';
 import {PathPromptDialog} from './ui/pathPromptDialog.js';
+import {validateAudioPath} from './ui/pathValidation.js';
 import {RecordingOverlay} from './ui/recordingOverlay.js';
 
 // SessionManager inhibit flags
@@ -877,6 +879,16 @@ export default class SpeakeasyExtension extends Extension {
      *      transcript is updated in place.
      */
     _recoverFromAudioFile() {
+        // Defense in depth: if a recovery is already in flight, refuse
+        // to start a second one. The menu item should also be grayed
+        // out by the sensitivity dance below, but we may race with a
+        // second click that was queued before the sensitivity update
+        // reached the compositor.
+        if (this._activeTranscriber) {
+            log('Speakeasy: recovery already in progress, ignoring request');
+            return;
+        }
+
         const audioDir = GLib.build_filenamev([
             GLib.get_user_data_dir(), 'speakeasy', 'audio',
         ]);
@@ -884,9 +896,19 @@ export default class SpeakeasyExtension extends Extension {
         // if the user has never retained any audio.
         try { GLib.mkdir_with_parents(audioDir, 0o755); } catch (_e) { /* ignore */ }
 
+        // Gray out the menu item for the duration of the flow so the
+        // user can't spawn a second FileTranscriber on top of this
+        // one. Re-enabled in the picker's cancel path, and in
+        // _startRecovery's onDone/onError/onCancel hooks.
+        this._panelIcon?.setRecoverFromFileSensitive(false);
+
         this._pickAudioFile(audioDir, (path) => {
-            if (path)
+            if (path) {
                 this._startRecovery(path);
+            } else {
+                // User cancelled the picker — re-enable the menu item.
+                this._panelIcon?.setRecoverFromFileSensitive(true);
+            }
         });
     }
 
@@ -999,16 +1021,41 @@ export default class SpeakeasyExtension extends Extension {
     _startRecovery(audioPath) {
         log(`Speakeasy: starting recovery for ${audioPath}`);
 
+        // Pre-flight the path before spawning a FileTranscriber.
+        // FileTranscriber.start() also checks this, but surfacing the
+        // error here means the user sees a notification instead of a
+        // half-opened dialog that flashes "Loading STT model..." and
+        // then errors out.
+        const {ok, error} = validateAudioPath(audioPath);
+        if (!ok) {
+            log(`Speakeasy: recovery pre-flight failed: ${error}`);
+            this._notify(`Cannot recover: ${error}`);
+            this._panelIcon?.setRecoverFromFileSensitive(true);
+            return;
+        }
+
+        // Guarantee we always re-enable the menu item, regardless of
+        // which exit path (save, cancel, error, dialog-closed) fires.
+        let reenabled = false;
+        const reenable = () => {
+            if (reenabled)
+                return;
+            reenabled = true;
+            this._panelIcon?.setRecoverFromFileSensitive(true);
+        };
+
         const dialog = new RecoveryDialog({
             audioPath,
             onSave: (rawText, doneInfo) => {
                 this._saveRecoveredTranscript(audioPath, rawText, doneInfo);
+                reenable();
             },
             onCancel: () => {
                 if (this._activeTranscriber) {
                     this._activeTranscriber.cancel();
                     this._activeTranscriber = null;
                 }
+                reenable();
             },
         });
 
@@ -1028,10 +1075,19 @@ export default class SpeakeasyExtension extends Extension {
             onDone: (info) => {
                 dialog.onDone(info);
                 this._activeTranscriber = null;
+                // The subprocess is done — the menu item is safe to
+                // re-enable even though the dialog may still be open
+                // waiting for the user to click Save. A second
+                // recovery can safely start while the user is still
+                // reading the result.
+                reenable();
             },
             onError: (msg) => {
                 dialog.onError(msg);
                 this._activeTranscriber = null;
+                // Error state — re-enable now so the user can retry
+                // without waiting to dismiss the dialog.
+                reenable();
             },
         });
 
@@ -1041,6 +1097,7 @@ export default class SpeakeasyExtension extends Extension {
         if (!transcriber.start(audioPath, null)) {
             log('Speakeasy: failed to start FileTranscriber');
             this._activeTranscriber = null;
+            reenable();
         }
     }
 
@@ -1130,49 +1187,33 @@ export default class SpeakeasyExtension extends Extension {
             return;
         }
         log(`Speakeasy: running AI cleanup on recovered transcript (${rawText.length} chars) on isolated instance`);
-        (async () => {
-            try {
-                await isolatedAi.beginSession();
-                isolatedAi.feedText(rawText);
-                const cleaned = await isolatedAi.finalize(null);
-                if (!cleaned || cleaned.trim() === '') {
-                    log('Speakeasy: AI cleanup returned empty for recovery');
-                    return;
-                }
-                log(`Speakeasy: recovery AI cleanup complete (${cleaned.length} chars)`);
 
-                // Rewrite the saved JSON with the cleaned text.
-                const updated = {
-                    timestamp: entry.timestamp,
-                    raw_text: rawText,
-                    cleaned_text: cleaned,
-                    audio_path: audioPath,
-                    ai_enabled: true,
-                    recovered: true,
-                };
-                try {
-                    const file = Gio.File.new_for_path(entry.filePath);
-                    file.replace_contents(
-                        new TextEncoder().encode(JSON.stringify(updated, null, 2)),
-                        null, false,
-                        Gio.FileCreateFlags.REPLACE_DESTINATION,
-                        null
-                    );
-                    log(`Speakeasy: recovery transcript updated with cleaned text`);
-                } catch (e) {
-                    log(`Speakeasy: failed to rewrite recovery transcript: ${e.message}`);
-                }
+        // Ensure the entry carries the fields rerunAiCleanup needs.
+        // controller.saveTranscript() doesn't set audioPath on the
+        // returned entry, but rerunAiCleanup preserves it in the
+        // rewritten JSON under the audio_path field.
+        entry.audioPath = audioPath;
+        entry.recovered = true;
 
-                // Update the in-memory entry too
-                entry.cleanedText = cleaned;
-                entry.aiEnabled = true;
-            } catch (e) {
-                log(`Speakeasy: recovery AI cleanup failed: ${e.message}`);
-            } finally {
-                // Always release the isolated AI's HTTP session.
-                try { isolatedAi.destroy(); } catch (_e) { /* ignore */ }
-            }
-        })();
+        runRecoveryCleanupWithFeedback(entry, isolatedAi, {
+            onStart: () => {
+                this._notify('Cleaning up recovered transcript via AI...');
+            },
+            onDone: (e) => {
+                log(`Speakeasy: recovery AI cleanup complete (${e.cleanedText?.length ?? 0} chars)`);
+                this._notify('Recovered transcript cleanup complete.');
+            },
+            onError: (err) => {
+                if (err)
+                    log(`Speakeasy: recovery AI cleanup failed: ${err.message}`);
+                else
+                    log('Speakeasy: recovery AI cleanup returned empty');
+                this._notify('AI cleanup failed for recovered transcript — raw text kept.');
+            },
+        }).finally(() => {
+            // Always release the isolated AI's HTTP session.
+            try { isolatedAi.destroy(); } catch (_e) { /* ignore */ }
+        });
     }
 
     // ─── Developer mode ──────────────────────────────────────────────

@@ -101,6 +101,20 @@ class SpeakeasyPanelIcon extends PanelMenu.Button {
     }
 
     /**
+     * Enable or disable the "Recover from Audio File..." menu item.
+     * Used by extension.js to gray out the entry while a recovery
+     * transcription is already in flight, so the user can't
+     * accidentally spawn a second FileTranscriber that would clobber
+     * the first one.
+     *
+     * @param {boolean} enabled - true to make clickable, false to gray out
+     */
+    setRecoverFromFileSensitive(enabled) {
+        if (this._recoverItem)
+            this._recoverItem.sensitive = !!enabled;
+    }
+
+    /**
      * Set callback for when "Preferences" is clicked.
      * @param {function} callback
      */

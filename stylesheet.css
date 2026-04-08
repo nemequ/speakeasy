@@ -292,3 +292,9 @@
 .speakeasy-path-prompt-entry:focus {
     border: 1px solid rgba(120, 170, 255, 0.6);
 }
+
+.speakeasy-path-prompt-error {
+    color: rgba(255, 120, 120, 0.95);
+    font-size: 0.9em;
+    padding: 4px 0 0 0;
+}

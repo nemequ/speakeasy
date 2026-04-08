@@ -13,6 +13,12 @@ import St from 'gi://St';
 
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 
+import {validateAudioPath} from './pathValidation.js';
+
+// Re-export so callers that already import from pathPromptDialog.js
+// can reach the validator without adding a second import.
+export {validateAudioPath};
+
 export const PathPromptDialog = GObject.registerClass(
 class SpeakeasyPathPromptDialog extends ModalDialog.ModalDialog {
     /**
@@ -60,6 +66,18 @@ class SpeakeasyPathPromptDialog extends ModalDialog.ModalDialog {
         });
         this.contentLayout.add_child(this._entry);
 
+        // Inline error label — hidden until the user enters a bad
+        // path. Validation happens on _accept() so the user can fix
+        // a typo without re-triggering the whole recovery flow.
+        this._errorLabel = new St.Label({
+            text: '',
+            style_class: 'speakeasy-path-prompt-error',
+            x_expand: true,
+            visible: false,
+        });
+        this._errorLabel.clutter_text.set_line_wrap(true);
+        this.contentLayout.add_child(this._errorLabel);
+
         this.addButton({
             label: 'Cancel',
             action: () => {
@@ -85,8 +103,21 @@ class SpeakeasyPathPromptDialog extends ModalDialog.ModalDialog {
     _accept() {
         if (this._accepted)
             return;
-        this._accepted = true;
         const text = this._entry.get_text().trim();
+
+        // Validate before closing — if the file is missing or
+        // unreadable, show an inline error and keep the dialog open
+        // so the user can fix the path. Only Cancel closes on error.
+        const {ok, error} = validateAudioPath(text);
+        if (!ok) {
+            this._errorLabel.text = error;
+            this._errorLabel.visible = true;
+            // Re-focus the entry so the user can immediately edit.
+            this._entry.grab_key_focus();
+            return;
+        }
+
+        this._accepted = true;
         if (this._onAccept)
             this._onAccept(text);
         this.close();
