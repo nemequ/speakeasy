@@ -199,7 +199,59 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         });
         storageGroup.add(transcriptHint);
 
+        // ── Health check / Test Recording ──
+        //
+        // New-user sanity check: open the standalone GTK debug
+        // console in a subprocess so the user can exercise the
+        // whole pipeline (mic -> STT -> AI cleanup) without
+        // committing to a real dictation. The prefs window runs in
+        // a separate process from the live extension, so we can't
+        // reuse the extension's recorder/AI instances — the GTK app
+        // builds its own. That's heavy (a second VOSK load) but
+        // acceptable for an explicit "test the pipeline" action.
+        const healthGroup = new Adw.PreferencesGroup({
+            title: _('Health Check'),
+            description: _('Verify the microphone, STT model, and AI ' +
+                'cleanup pipeline are wired up correctly. Opens the ' +
+                'Speakeasy Debug Console in a separate window.'),
+        });
+        page.add(healthGroup);
+
+        const testRow = new Adw.ActionRow({
+            title: _('Test Recording'),
+            subtitle: _('Launches the Debug Console. Click ' +
+                '"Test Recording (3s)" there to run a short end-to-end test.'),
+        });
+        const testButton = new Gtk.Button({
+            label: _('Open Debug Console'),
+            valign: Gtk.Align.CENTER,
+        });
+        testButton.connect('clicked', () => {
+            this._launchDebugConsole();
+        });
+        testRow.add_suffix(testButton);
+        healthGroup.add(testRow);
+
         return page;
+    }
+
+    /**
+     * Spawn the standalone GTK debug app in a subprocess. The prefs
+     * window process stays responsive — we don't wait on the child.
+     */
+    _launchDebugConsole() {
+        try {
+            const gtkAppPath = GLib.build_filenamev([this.path, 'gtk-app.js']);
+            const subproc = Gio.Subprocess.new(
+                ['gjs', '-m', gtkAppPath],
+                Gio.SubprocessFlags.NONE
+            );
+            // Detach: we don't care about the exit status here.
+            subproc.wait_async(null, (_proc, _res) => { /* ignored */ });
+            log(`Speakeasy prefs: launched debug console: ${gtkAppPath}`);
+        } catch (e) {
+            log(`Speakeasy prefs: failed to launch debug console: ${e.message}`);
+        }
     }
 
     // ─── STT page ────────────────────────────────────────────────────
@@ -639,6 +691,16 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         settings.bind('verbose-logging', verboseRow, 'active',
             Gio.SettingsBindFlags.DEFAULT);
         devGroup.add(verboseRow);
+
+        // Separate dim-label row pointing the user at the log output.
+        // The SwitchRow's subtitle already describes what the toggle
+        // does; this row is a hint for "where do I read the output?".
+        const verboseHint = new Adw.ActionRow({
+            title: _('View output via: journalctl --user -g Speakeasy  ' +
+                '(or in GNOME Logs / gnome-system-log)'),
+            css_classes: ['dim-label'],
+        });
+        devGroup.add(verboseHint);
 
         // ── Prompt files group ──
         const promptGroup = new Adw.PreferencesGroup({

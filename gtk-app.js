@@ -35,6 +35,7 @@ import {FileTranscriber} from './fileTranscribe.js';
 import {runRecoveryCleanupWithFeedback} from './recoveryCleanup.js';
 import {validateAudioPath} from './ui/pathValidation.js';
 import {openTranscriptHistoryWindow} from './ui/transcriptHistoryWindow.js';
+import {runTestRecording} from './testRecording.js';
 
 const APP_ID = 'local.speakeasy.test';
 const SCHEMA_ID = 'org.gnome.shell.extensions.speakeasy';
@@ -127,7 +128,7 @@ app.connect('activate', () => {
     // ── Build the window ──
     const window = new Gtk.ApplicationWindow({
         application: app,
-        title: 'Speakeasy (test app)',
+        title: 'Speakeasy \u2014 Debug Console',
         default_width: 800,
         default_height: 700,
     });
@@ -141,6 +142,19 @@ app.connect('activate', () => {
         spacing: 8,
     });
     window.set_child(root);
+
+    // Disclaimer — make it obvious this isn't the normal way to use
+    // Speakeasy. New users who open this by mistake should know the
+    // real extension lives in the panel.
+    const disclaimer = new Gtk.Label({
+        label: 'This is a debug/test tool. The push-to-talk extension ' +
+            'lives in the GNOME Shell panel.',
+        xalign: 0,
+        wrap: true,
+        wrap_mode: 2,  // Pango.WrapMode.WORD_CHAR
+        css_classes: ['dim-label'],
+    });
+    root.append(disclaimer);
 
     // Status bar with state + AI backend selector
     const statusBox = new Gtk.Box({
@@ -259,12 +273,14 @@ app.connect('activate', () => {
     });
     const stopBtn = new Gtk.Button({label: 'Stop (F6)', sensitive: false});
     const discardBtn = new Gtk.Button({label: 'Discard (F7)', sensitive: false});
+    const testBtn = new Gtk.Button({label: 'Test Recording (3s)'});
     const recoverBtn = new Gtk.Button({label: 'Recover from File...'});
     const historyBtn = new Gtk.Button({label: 'Show Transcripts'});
     const clearBtn = new Gtk.Button({label: 'Clear views'});
     buttonBox.append(startBtn);
     buttonBox.append(stopBtn);
     buttonBox.append(discardBtn);
+    buttonBox.append(testBtn);
     buttonBox.append(recoverBtn);
     buttonBox.append(historyBtn);
     buttonBox.append(clearBtn);
@@ -299,9 +315,17 @@ app.connect('activate', () => {
         settings,
         onStateChanged: (state) => {
             stateLabel.set_markup(`<b>State:</b> ${state}`);
-            startBtn.sensitive = state === ControllerState.IDLE;
-            stopBtn.sensitive = state === ControllerState.RECORDING;
-            discardBtn.sensitive = state === ControllerState.RECORDING;
+            // During the test recording we drive the buttons
+            // manually — the helper owns start/stop, and we want
+            // the other buttons locked out so the user can't
+            // interfere. _testRunning is set by the Test button
+            // handler below.
+            if (!window._testRunning) {
+                startBtn.sensitive = state === ControllerState.IDLE;
+                stopBtn.sensitive = state === ControllerState.RECORDING;
+                discardBtn.sensitive = state === ControllerState.RECORDING;
+                testBtn.sensitive = state === ControllerState.IDLE;
+            }
             if (state === ControllerState.IDLE)
                 partialLabel.set_label('');
         },
@@ -342,6 +366,7 @@ app.connect('activate', () => {
         const end = buffer.get_end_iter();
         buffer.insert(end, `[startup error] ${msg}\n`, -1);
         startBtn.sensitive = false;
+        testBtn.sensitive = false;
         statusBox.set_tooltip_text(msg);
     }
 
@@ -349,11 +374,13 @@ app.connect('activate', () => {
     // start. The button is enabled by default; we just disable it
     // until ready and re-enable in the onReady callback.
     startBtn.sensitive = false;
+    testBtn.sensitive = false;
     statusBox.set_tooltip_text('Loading STT model...');
     recorder.onReady(() => {
         print('[gtk-app] STT subprocess ready');
         statusBox.set_tooltip_text(null);
         startBtn.sensitive = controller.getState() === ControllerState.IDLE;
+        testBtn.sensitive = controller.getState() === ControllerState.IDLE;
     });
     if (!recorder.init()) {
         const reason = recorder.getLastInitFailureReason?.();
@@ -383,6 +410,86 @@ app.connect('activate', () => {
         finalsView.tv.buffer.set_text('', -1);
         resultView.tv.buffer.set_text('', -1);
         partialLabel.set_label('');
+    });
+
+    // ── Test Recording button ──
+    //
+    // Automated 3-second recording that drives the whole pipeline
+    // (mic -> STT -> AI cleanup -> TextViewOutput) so a new user
+    // can confirm everything is wired up without committing to a
+    // real dictation. The result flows through the existing
+    // controller callbacks — we just own the button labels and
+    // disable the other buttons while the test is in flight.
+    const TEST_DURATION_SECS = 3;
+    testBtn.connect('clicked', () => {
+        // Pre-flight: recorder must be ready. The button is already
+        // desensitized while the model loads, but a defense-in-depth
+        // check keeps the error visible in the result view if
+        // something slips through.
+        if (!recorder.isReady?.()) {
+            const buffer = resultView.tv.buffer;
+            const end = buffer.get_end_iter();
+            buffer.insert(end,
+                '[test recording] recorder not ready yet — wait for the STT model to load\n',
+                -1);
+            return;
+        }
+        if (controller.getState() !== ControllerState.IDLE) {
+            const buffer = resultView.tv.buffer;
+            const end = buffer.get_end_iter();
+            buffer.insert(end,
+                `[test recording] controller busy (state: ${controller.getState()})\n`,
+                -1);
+            return;
+        }
+
+        window._testRunning = true;
+        const prevTestLabel = testBtn.label;
+        startBtn.sensitive = false;
+        stopBtn.sensitive = false;
+        discardBtn.sensitive = false;
+        recoverBtn.sensitive = false;
+        testBtn.sensitive = false;
+        testBtn.label = `Recording... (${TEST_DURATION_SECS}s)`;
+
+        const unlock = () => {
+            window._testRunning = false;
+            testBtn.label = prevTestLabel;
+            const idle = controller.getState() === ControllerState.IDLE;
+            startBtn.sensitive = idle;
+            stopBtn.sensitive = !idle && controller.getState() === ControllerState.RECORDING;
+            discardBtn.sensitive = !idle && controller.getState() === ControllerState.RECORDING;
+            testBtn.sensitive = idle;
+            recoverBtn.sensitive = !activeRecoveryTranscriber;
+        };
+
+        runTestRecording(controller, TEST_DURATION_SECS, {
+            scheduler: (cb, secs) => {
+                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secs, () => {
+                    testBtn.label = 'Processing...';
+                    // Fire the stop and restore UI once the whole
+                    // stop()+AI cleanup pipeline resolves. The
+                    // cleaned text will have already been appended
+                    // to the result view by TextViewOutput.
+                    Promise.resolve(cb()).finally(unlock);
+                    return GLib.SOURCE_REMOVE;
+                });
+            },
+        }).then((result) => {
+            if (!result.started) {
+                const buffer = resultView.tv.buffer;
+                const end = buffer.get_end_iter();
+                buffer.insert(end,
+                    `[test recording] failed to start: ${result.reason ?? 'unknown'}\n`,
+                    -1);
+                unlock();
+            }
+        }).catch((e) => {
+            const buffer = resultView.tv.buffer;
+            const end = buffer.get_end_iter();
+            buffer.insert(end, `[test recording] error: ${e.message}\n`, -1);
+            unlock();
+        });
     });
 
     // ── Recover from file ──
