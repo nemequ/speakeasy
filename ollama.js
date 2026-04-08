@@ -20,6 +20,11 @@ const DEFAULT_MODEL = 'qwen2.5:3b';
 const MAX_RETRIES = 1;
 const RETRY_BASE_MS = 500;
 
+// Default request timeout in seconds. Overridden by GSettings via
+// the shared 'ai-request-timeout-secs' key (same as the Anthropic
+// backend). 0 = no timeout (not recommended).
+const DEFAULT_REQUEST_TIMEOUT_SECS = 60;
+
 // Framing text for single-shot cleanup requests. Instructs the model
 // that the input is raw STT output and uses END-OF-DICTATION as the
 // end-of-input marker (no per-session UUID needed for single-shot).
@@ -62,6 +67,8 @@ export class OllamaCleanup {
         this._settings = null;
         this._settingsChangedIds = [];
 
+        this._requestTimeoutSecs = DEFAULT_REQUEST_TIMEOUT_SECS;
+
         // Extension directory — used to resolve bundled prompt files
         this._extensionDir = null;
         this._systemPromptPath = '';
@@ -95,7 +102,7 @@ export class OllamaCleanup {
 
         const keys = [
             'ollama-url', 'ollama-model', 'ai-enabled',
-            'system-prompt-path',
+            'system-prompt-path', 'ai-request-timeout-secs',
         ];
         for (const key of keys) {
             this._settingsChangedIds.push(
@@ -111,6 +118,10 @@ export class OllamaCleanup {
         this._model = this._settings.get_string('ollama-model') || DEFAULT_MODEL;
         this._enabled = this._settings.get_boolean('ai-enabled');
         this._systemPromptPath = this._settings.get_string('system-prompt-path');
+        this._requestTimeoutSecs = this._settings.get_uint('ai-request-timeout-secs');
+
+        if (this._session)
+            this._applySessionTimeout();
     }
 
     /**
@@ -119,7 +130,21 @@ export class OllamaCleanup {
      */
     init() {
         this._session = new Soup.Session();
+        this._applySessionTimeout();
         return true;
+    }
+
+    /**
+     * Apply the configured request timeout to the Soup.Session.
+     * 0 disables the timeout (Soup convention).
+     */
+    _applySessionTimeout() {
+        if (!this._session)
+            return;
+        const t = this._requestTimeoutSecs;
+        this._session.timeout = t;
+        this._session.idle_timeout = t;
+        log(`Speakeasy Ollama: HTTP timeout set to ${t}s`);
     }
 
     /**

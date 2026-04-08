@@ -218,6 +218,64 @@
       </description>
     </key>
 
+    <!-- AI request timeout. Bounds how long any single Anthropic /
+         Ollama HTTP request can hang before being aborted. Without
+         this, a slow API can freeze the compositor for the duration
+         of the call (we await the request synchronously from the
+         stop-recording path). -->
+    <key name="ai-request-timeout-secs" type="u">
+      <default>60</default>
+      <summary>AI request timeout (seconds)</summary>
+      <description>
+        Maximum time in seconds any single AI HTTP request may take
+        before being aborted. Applied to both intermediate cache-warm
+        requests during recording and the final cleanup request.
+        0 disables the timeout (NOT recommended — a hung request will
+        block the recording stop path indefinitely). Default: 60.
+      </description>
+    </key>
+
+    <!-- Maximum number of conversation turn pairs to keep in the AI
+         session history. Caps the request body size for long
+         dictation sessions. The framing pair is always preserved;
+         oldest chunk pairs are dropped first when the limit is hit.
+         Each pair is one user turn (a chunk of dictated text) plus
+         the assistant placeholder. With the default 30s flush
+         interval, 20 pairs covers ~10 minutes of recent context. -->
+    <key name="ai-max-history-turns" type="u">
+      <default>20</default>
+      <summary>AI conversation history cap (turn pairs)</summary>
+      <description>
+        Maximum number of user/assistant turn pairs to keep in the AI
+        conversation history during a dictation session. Long sessions
+        previously grew unbounded, producing huge request bodies that
+        could hang on serialization or upload. The framing pair is
+        always preserved; oldest chunk pairs are dropped first when
+        the limit is exceeded. 0 disables the cap. Default: 20.
+      </description>
+    </key>
+
+    <!-- Watchdog timeout for the recorder.stop() → subprocess
+         "stopped" event handshake. If the subprocess wedges
+         (e.g. VOSK's current-final-results flush in a busy loop),
+         the parent SIGKILLs it after this many seconds and
+         synthesizes the stop result from accumulated final
+         segments. Without this, a subprocess hang would freeze the
+         compositor's stop-recording path indefinitely — exactly the
+         bug that lost a long dictation session on 2026-04-08. -->
+    <key name="recorder-stop-timeout-secs" type="u">
+      <default>10</default>
+      <summary>Recorder stop watchdog timeout (seconds)</summary>
+      <description>
+        Maximum time in seconds to wait for the STT subprocess to
+        confirm a stop request. If the subprocess does not respond
+        in time, the parent kills it (SIGKILL) and synthesizes the
+        stop result from any final segments already received. The
+        subprocess is automatically respawned for the next recording.
+        0 disables the watchdog (NOT recommended). Default: 10.
+      </description>
+    </key>
+
     <!-- ============================================================
          AI prompts (external files, reloaded per session)
          ============================================================ -->

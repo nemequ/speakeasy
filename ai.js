@@ -39,6 +39,18 @@ const CHUNK_FLUSH_INTERVAL_MS = 30000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 200;  // 200ms, 800ms, 3200ms
 
+// Default request timeout in seconds. Overridden by GSettings.
+// 0 = no timeout (not recommended — a hung request blocks the stop
+// path indefinitely, which is exactly the bug that lost the user's
+// long dictation session).
+const DEFAULT_REQUEST_TIMEOUT_SECS = 60;
+
+// Default cap on conversation history (turn pairs). Overridden by
+// GSettings. The framing pair is always preserved; oldest chunk
+// pairs are dropped first when the cap is exceeded. Bounds the
+// request body size for long sessions.
+const DEFAULT_MAX_HISTORY_TURNS = 20;
+
 // Placeholder for intermediate assistant turns. We set max_tokens=1
 // so the model generates ~1 token, but we don't read it — we store
 // this fixed string in the conversation history instead.
@@ -122,6 +134,10 @@ export class AICleanup {
         this._settings = null;
         this._settingsChangedIds = [];
 
+        // Robustness knobs (loaded from settings, reapplied on change)
+        this._requestTimeoutSecs = DEFAULT_REQUEST_TIMEOUT_SECS;
+        this._maxHistoryTurns = DEFAULT_MAX_HISTORY_TURNS;
+
         // Extension directory — used to resolve bundled prompt files
         this._extensionDir = null;
 
@@ -171,6 +187,7 @@ export class AICleanup {
             'anthropic-api-key', 'anthropic-model', 'ai-enabled',
             'system-prompt-path', 'framing-prompt-path',
             'proxy-url', 'proxy-ca-cert',
+            'ai-request-timeout-secs', 'ai-max-history-turns',
         ];
         for (const key of keys) {
             this._settingsChangedIds.push(
@@ -189,10 +206,31 @@ export class AICleanup {
         this._framingPromptPath = this._settings.get_string('framing-prompt-path');
         this._proxyUrl = this._settings.get_string('proxy-url');
         this._proxyCaCert = this._settings.get_string('proxy-ca-cert');
+        this._requestTimeoutSecs = this._settings.get_uint('ai-request-timeout-secs');
+        this._maxHistoryTurns = this._settings.get_uint('ai-max-history-turns');
 
-        // Re-configure session proxy/TLS if already initialized.
-        if (this._session)
+        // Re-configure session proxy/TLS and timeout if already initialized.
+        if (this._session) {
             this._configureSessionProxy();
+            this._applySessionTimeout();
+        }
+    }
+
+    /**
+     * Apply the configured request timeout to the Soup.Session.
+     * Soup.Session uses 0 to mean "no timeout" — we follow that
+     * convention. The timeout is the maximum time the entire request
+     * (including TLS handshake, request send, response receive) can
+     * take. idle_timeout bounds time spent waiting for data on a
+     * keep-alive socket.
+     */
+    _applySessionTimeout() {
+        if (!this._session)
+            return;
+        const t = this._requestTimeoutSecs;
+        this._session.timeout = t;
+        this._session.idle_timeout = t;
+        log(`Speakeasy AI: HTTP timeout set to ${t}s`);
     }
 
     /**
@@ -202,6 +240,7 @@ export class AICleanup {
     init() {
         this._session = new Soup.Session();
         this._configureSessionProxy();
+        this._applySessionTimeout();
         return true;
     }
 
@@ -537,6 +576,48 @@ export class AICleanup {
         this._resetSession();
     }
 
+    // ─── Internal: history cap ───────────────────────────────────────
+
+    /**
+     * Trim _conversationHistory to at most _maxHistoryTurns turn pairs.
+     *
+     * The framing pair (history[0]=user framing, history[1]=assistant
+     * placeholder) is always preserved so the model still sees the
+     * cleanup instructions. Older chunk pairs (user dictation chunk +
+     * assistant placeholder) are dropped from the front, oldest first.
+     *
+     * Pairs are dropped in twos to keep the user/assistant alternation
+     * required by the Anthropic API. We do not summarize dropped
+     * content; the bytes simply go away. The most recent K-1 chunks
+     * stay, and the FINAL turn (added by finalize()) is the one the
+     * model is asked to clean up — that one always survives because
+     * the cap runs before the final turn is appended.
+     *
+     * 0 disables the cap entirely (caller's risk).
+     */
+    _capHistory() {
+        if (this._maxHistoryTurns <= 0)
+            return;
+
+        // Always preserve the framing pair (2 entries).
+        const PRESERVE = 2;
+        const allowedAfter = Math.max(0, 2 * (this._maxHistoryTurns - 1));
+        const maxEntries = PRESERVE + allowedAfter;
+
+        if (this._conversationHistory.length <= maxEntries)
+            return;
+
+        const excess = this._conversationHistory.length - maxEntries;
+        // Drop in pairs to preserve user/assistant alternation.
+        const toDrop = excess - (excess % 2);
+        if (toDrop === 0)
+            return;
+
+        this._conversationHistory.splice(PRESERVE, toDrop);
+        log(`Speakeasy AI: history cap — dropped ${toDrop} oldest entries ` +
+            `(now ${this._conversationHistory.length}, max=${maxEntries})`);
+    }
+
     // ─── Internal: intermediate requests ─────────────────────────────
 
     /**
@@ -581,6 +662,9 @@ export class AICleanup {
     async _sendIntermediateRequest() {
         const sessionUuid = this._sessionUuid;
 
+        // Cap before snapshotting so the request body is bounded.
+        this._capHistory();
+
         const body = {
             model: this._model,
             max_tokens: 1,
@@ -617,6 +701,12 @@ export class AICleanup {
      * @returns {Promise<string>} Full cleaned text
      */
     async _sendFinalRequest(onDelta) {
+        // Cap before snapshotting so the request body is bounded.
+        // Note: the final user turn (added by finalize()) is at the
+        // end of history and is preserved by _capHistory(); only
+        // older chunk pairs are dropped.
+        this._capHistory();
+
         const body = {
             model: this._model,
             max_tokens: 4096,

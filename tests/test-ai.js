@@ -409,6 +409,152 @@ test('init() creates Soup session and returns true', () => {
     ai.destroy();
 });
 
+test('init() applies the configured request timeout to the Soup session', () => {
+    // The timeout is the safety net that stops the freeze the user
+    // hit on a long session. Without this, send_async() can block
+    // the main loop forever waiting for a hung API.
+    const ai = new AICleanup();
+    ai._requestTimeoutSecs = 30;
+    ai.init();
+    assertEqual(ai._session.timeout, 30, 'request timeout');
+    assertEqual(ai._session.idle_timeout, 30, 'idle timeout');
+    ai.destroy();
+});
+
+test('_applySessionTimeout() reapplies after settings change', () => {
+    const ai = new AICleanup();
+    ai._requestTimeoutSecs = 60;
+    ai.init();
+    assertEqual(ai._session.timeout, 60, 'initial timeout');
+
+    ai._requestTimeoutSecs = 5;
+    ai._applySessionTimeout();
+    assertEqual(ai._session.timeout, 5, 'updated timeout');
+    assertEqual(ai._session.idle_timeout, 5, 'updated idle timeout');
+    ai.destroy();
+});
+
+test('_capHistory() does nothing when under the cap', () => {
+    const ai = new AICleanup();
+    ai._maxHistoryTurns = 20;
+    ai._conversationHistory = [
+        {role: 'user', content: 'framing'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'chunk1'},
+        {role: 'assistant', content: '...'},
+    ];
+    ai._capHistory();
+    assertEqual(ai._conversationHistory.length, 4, 'no entries dropped');
+});
+
+test('_capHistory() drops oldest chunk pair when over the cap', () => {
+    const ai = new AICleanup();
+    ai._maxHistoryTurns = 2;  // 4 entries max
+    ai._conversationHistory = [
+        {role: 'user', content: 'framing'},      // 0 (preserved)
+        {role: 'assistant', content: '...'},     // 1 (preserved)
+        {role: 'user', content: 'chunk1'},       // 2
+        {role: 'assistant', content: '...'},     // 3
+        {role: 'user', content: 'chunk2'},       // 4
+        {role: 'assistant', content: '...'},     // 5
+    ];
+    ai._capHistory();
+    // Excess = 6 - 4 = 2; drops pair starting at index 2
+    assertEqual(ai._conversationHistory.length, 4, 'one pair dropped');
+    assertEqual(ai._conversationHistory[0].content, 'framing', 'framing preserved');
+    assertEqual(ai._conversationHistory[1].content, '...', 'framing assistant preserved');
+    assertEqual(ai._conversationHistory[2].content, 'chunk2', 'newest chunk preserved');
+});
+
+test('_capHistory() drops multiple pairs from oldest first', () => {
+    const ai = new AICleanup();
+    ai._maxHistoryTurns = 2;  // 4 entries max
+    ai._conversationHistory = [
+        {role: 'user', content: 'framing'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'chunk1'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'chunk2'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'chunk3'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'chunk4'},
+        {role: 'assistant', content: '...'},
+    ];
+    ai._capHistory();
+    // Excess = 10 - 4 = 6; drops 6 entries (3 pairs) from index 2
+    assertEqual(ai._conversationHistory.length, 4, '3 pairs dropped');
+    assertEqual(ai._conversationHistory[0].content, 'framing', 'framing preserved');
+    assertEqual(ai._conversationHistory[2].content, 'chunk4', 'only newest pair kept');
+});
+
+test('_capHistory() preserves the trailing final user turn', () => {
+    // finalize() pushes a final user turn before the cap runs in
+    // _sendFinalRequest. The cap drops in pairs from index 2, so
+    // the trailing odd turn at the end always survives.
+    const ai = new AICleanup();
+    ai._maxHistoryTurns = 2;  // 4 entries max
+    ai._conversationHistory = [
+        {role: 'user', content: 'framing'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'chunk1'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'final UUID'},
+    ];
+    ai._capHistory();
+    // Excess = 5 - 4 = 1; toDrop = 1 - 1%2 = 0; nothing dropped.
+    // The final turn lives. Slight over-budget by 1, acceptable.
+    assertEqual(ai._conversationHistory.length, 5, 'no drop when excess is odd');
+    assertEqual(
+        ai._conversationHistory[4].content,
+        'final UUID',
+        'final turn preserved'
+    );
+});
+
+test('_capHistory() with cap=0 disables capping entirely', () => {
+    const ai = new AICleanup();
+    ai._maxHistoryTurns = 0;
+    const before = [];
+    for (let i = 0; i < 100; i++) {
+        before.push({role: 'user', content: `c${i}`});
+        before.push({role: 'assistant', content: '...'});
+    }
+    ai._conversationHistory = [...before];
+    ai._capHistory();
+    assertEqual(ai._conversationHistory.length, 200, 'no cap = no drops');
+});
+
+test('_capHistory() preserves alternation after dropping', () => {
+    // Critical: dropping in pairs must keep user/assistant alternating,
+    // or the Anthropic API rejects the request.
+    const ai = new AICleanup();
+    ai._maxHistoryTurns = 3;  // 6 entries max
+    ai._conversationHistory = [
+        {role: 'user', content: 'framing'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'c1'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'c2'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'c3'},
+        {role: 'assistant', content: '...'},
+        {role: 'user', content: 'c4'},
+        {role: 'assistant', content: '...'},
+    ];
+    ai._capHistory();
+    assertEqual(ai._conversationHistory.length, 6, '4 entries dropped');
+    // Check alternation
+    for (let i = 0; i < ai._conversationHistory.length; i++) {
+        const expectedRole = i % 2 === 0 ? 'user' : 'assistant';
+        assertEqual(
+            ai._conversationHistory[i].role,
+            expectedRole,
+            `entry ${i} role`
+        );
+    }
+});
+
 test('destroy() cleans up', () => {
     const ai = new AICleanup();
     ai.init();

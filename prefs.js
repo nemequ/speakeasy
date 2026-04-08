@@ -403,6 +403,45 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         });
         ollamaGroup.add(ollamaHint);
 
+        // ── Robustness ──
+        // Bounds the time and request size for AI calls so a slow API
+        // or a long dictation session can't hang the stop-recording
+        // path. Both apply to Anthropic and Ollama.
+        const robustGroup = new Adw.PreferencesGroup({
+            title: _('Robustness'),
+            description: _('Bound how long an AI request can hang and how ' +
+                'large the conversation history can grow. These caps prevent ' +
+                'long sessions from freezing the compositor.'),
+        });
+        page.add(robustGroup);
+
+        const timeoutRow = new Adw.SpinRow({
+            title: _('Request Timeout (seconds)'),
+            subtitle: _('Maximum time any single AI HTTP request may take. ' +
+                '0 disables the timeout (not recommended).'),
+            adjustment: new Gtk.Adjustment({
+                lower: 0, upper: 600, step_increment: 5, page_increment: 30,
+                value: settings.get_uint('ai-request-timeout-secs'),
+            }),
+        });
+        settings.bind('ai-request-timeout-secs', timeoutRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        robustGroup.add(timeoutRow);
+
+        const historyCapRow = new Adw.SpinRow({
+            title: _('History Cap (turn pairs)'),
+            subtitle: _('Maximum conversation turn pairs to keep during a ' +
+                'session. Older chunks are dropped first. 20 ≈ 10 minutes ' +
+                'of recent context. 0 disables the cap.'),
+            adjustment: new Gtk.Adjustment({
+                lower: 0, upper: 200, step_increment: 1, page_increment: 10,
+                value: settings.get_uint('ai-max-history-turns'),
+            }),
+        });
+        settings.bind('ai-max-history-turns', historyCapRow, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
+        robustGroup.add(historyCapRow);
+
         // Show/hide backend-specific groups
         const updateVisibility = () => {
             const isOllama = settings.get_string('ai-backend') === 'ollama';
