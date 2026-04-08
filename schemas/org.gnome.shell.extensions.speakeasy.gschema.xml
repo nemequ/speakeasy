@@ -348,5 +348,36 @@
       </description>
     </key>
 
+    <!-- ============================================================
+         Audio retention
+         ============================================================ -->
+
+    <!-- Whether to keep the .opus audio file after a successful
+         session. Independent of verbose-logging. -->
+    <key name="retain-audio" type="b">
+      <default>false</default>
+      <summary>Retain audio recordings</summary>
+      <description>
+        When enabled, the .opus audio file produced during each
+        recording is kept on disk after a successful transcription.
+        Useful for QA, prompt tuning, and recovering audio after a
+        crash. Files are written to the directory configured by
+        'audio-dir'. Off by default to save disk space.
+      </description>
+    </key>
+
+    <!-- Directory for retained audio files.
+         Empty = use $XDG_DATA_HOME/speakeasy/audio -->
+    <key name="audio-dir" type="s">
+      <default>''</default>
+      <summary>Audio save directory</summary>
+      <description>
+        Directory where retained audio files are written. Leave
+        empty to use ~/.local/share/speakeasy/audio. The directory
+        is created automatically. Files are named
+        speakeasy-YYYYMMDD-HHMMSS.opus.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

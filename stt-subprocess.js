@@ -367,10 +367,45 @@ class SttSubprocess {
 
     stopFile() {
         if (!this.filePipeline) return;
-        this.filePipeline.send_event(Gst.Event.new_eos());
-        this.filePipeline.set_state(Gst.State.NULL);
+
+        // Send EOS so oggmux writes its trailer and filesink flushes
+        // its buffers. Then WAIT for the EOS to propagate all the way
+        // through the pipeline before tearing it down — otherwise the
+        // .opus file may be missing its Ogg trailer or the last chunk
+        // of audio (the bug that prompted Phase 2).
+        //
+        // We use a bounded timed wait on the bus instead of running a
+        // mini main loop, so this method stays synchronous and we
+        // can't accidentally hang the subprocess if EOS never arrives.
         const bus = this.filePipeline.get_bus();
-        bus.remove_signal_watch();
+        try {
+            this.filePipeline.send_event(Gst.Event.new_eos());
+
+            // 2 seconds is plenty for opusenc/oggmux to finalize a
+            // few seconds of buffered PCM. If we time out, the file
+            // is probably truncated, but tearing down anyway is
+            // better than blocking forever.
+            const TIMEOUT_NS = 2 * Gst.SECOND;
+            const msgMask = Gst.MessageType.EOS | Gst.MessageType.ERROR;
+            const msg = bus.timed_pop_filtered(TIMEOUT_NS, msgMask);
+            if (msg === null) {
+                debug(`stopFile: timed out waiting for EOS — audio file may be truncated`);
+            } else if (msg.type === Gst.MessageType.ERROR) {
+                const [err] = msg.parse_error();
+                debug(`stopFile: pipeline error during EOS wait: ${err.message}`);
+            }
+        } catch (e) {
+            debug(`stopFile: error during EOS handling: ${e.message}`);
+        }
+
+        try {
+            this.filePipeline.set_state(Gst.State.NULL);
+        } catch (e) {
+            debug(`stopFile: set_state(NULL) failed: ${e.message}`);
+        }
+        try {
+            bus.remove_signal_watch();
+        } catch (_e) { /* not connected if we never reached signal_watch */ }
         this.filePipeline = null;
         debug(`File recording stopped (${this.audioPath})`);
     }

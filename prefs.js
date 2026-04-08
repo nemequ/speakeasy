@@ -121,6 +121,84 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         historyGroup.add(maxTranscriptsRow);
 
+        // ── Storage group ──
+        // Audio retention is now decoupled from verbose-logging.
+        // Files are written to a persistent location either way; this
+        // toggle controls whether they survive past the end of a
+        // successful transcription.
+        const storageGroup = new Adw.PreferencesGroup({
+            title: _('Storage'),
+            description: _('Where transcripts and (optionally) audio ' +
+                'recordings are written.'),
+        });
+        page.add(storageGroup);
+
+        const retainAudioRow = new Adw.SwitchRow({
+            title: _('Retain Audio Recordings'),
+            subtitle: _('Keep the .opus audio file after a successful ' +
+                'transcription. Useful for QA and recovering audio after ' +
+                'a crash. Off by default.'),
+        });
+        settings.bind('retain-audio', retainAudioRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        storageGroup.add(retainAudioRow);
+
+        const audioDirRow = new Adw.EntryRow({
+            title: _('Audio Directory'),
+            show_apply_button: true,
+            text: settings.get_string('audio-dir'),
+        });
+        audioDirRow.connect('apply', () => {
+            settings.set_string('audio-dir', audioDirRow.text);
+        });
+        settings.connect('changed::audio-dir', () => {
+            audioDirRow.text = settings.get_string('audio-dir');
+        });
+        const audioBrowseButton = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for audio directory'),
+        });
+        audioBrowseButton.connect('clicked', () => {
+            this._browseFolder(audioDirRow, settings, 'audio-dir');
+        });
+        audioDirRow.add_suffix(audioBrowseButton);
+        storageGroup.add(audioDirRow);
+
+        const audioHint = new Adw.ActionRow({
+            title: _('Leave empty for ~/.local/share/speakeasy/audio'),
+            css_classes: ['dim-label'],
+        });
+        storageGroup.add(audioHint);
+
+        const transcriptDirRow = new Adw.EntryRow({
+            title: _('Transcript Directory'),
+            show_apply_button: true,
+            text: settings.get_string('transcript-dir'),
+        });
+        transcriptDirRow.connect('apply', () => {
+            settings.set_string('transcript-dir', transcriptDirRow.text);
+        });
+        settings.connect('changed::transcript-dir', () => {
+            transcriptDirRow.text = settings.get_string('transcript-dir');
+        });
+        const transcriptBrowseButton = new Gtk.Button({
+            icon_name: 'folder-open-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: _('Browse for transcript directory'),
+        });
+        transcriptBrowseButton.connect('clicked', () => {
+            this._browseFolder(transcriptDirRow, settings, 'transcript-dir');
+        });
+        transcriptDirRow.add_suffix(transcriptBrowseButton);
+        storageGroup.add(transcriptDirRow);
+
+        const transcriptHint = new Adw.ActionRow({
+            title: _('Leave empty for ~/.local/share/speakeasy/transcripts'),
+            css_classes: ['dim-label'],
+        });
+        storageGroup.add(transcriptHint);
+
         return page;
     }
 
