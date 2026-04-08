@@ -50,7 +50,13 @@ export class Recorder {
         this._onLevel = null;
 
         // Pending stop — resolved when the subprocess sends "stopped"
+        // OR when the watchdog timer fires (in which case we SIGKILL
+        // the subprocess and synthesize the stop result from
+        // _accumulatedText). The watchdog protects against subprocess
+        // hangs in VOSK's flush path — see _onStopWatchdogFired().
         this._stopResolve = null;
+        this._stopWatchdogId = 0;
+        this._stopTimeoutSecs = 10;  // overridden from settings
 
         // Read loop cancellation
         this._readCancellable = null;
@@ -79,7 +85,7 @@ export class Recorder {
         this._settings = settings;
         this._loadSettings();
 
-        const keys = ['stt-backend', 'vosk-model-path', 'whisper-model-path', 'whisper-language'];
+        const keys = ['stt-backend', 'vosk-model-path', 'whisper-model-path', 'whisper-language', 'audio-input-device', 'audio-dir', 'recorder-stop-timeout-secs'];
         for (const key of keys) {
             this._settingsChangedIds.push(
                 this._settings.connect(`changed::${key}`, () => {
@@ -108,6 +114,31 @@ export class Recorder {
         if (whisperPath && whisperPath !== '')
             this._whisperModelPath = whisperPath;
         this._whisperLanguage = this._settings.get_string('whisper-language') || 'en';
+        this._audioInputDevice = this._settings.get_string('audio-input-device') || '';
+        this._audioDirOverride = this._settings.get_string('audio-dir') || '';
+        this._stopTimeoutSecs = this._settings.get_uint('recorder-stop-timeout-secs');
+    }
+
+    /**
+     * Resolve the directory where audio recordings are written. Always
+     * a persistent location (~/.local/share/speakeasy/audio by default,
+     * or the user-configured 'audio-dir'). Created if missing.
+     *
+     * Note: the file is *always* written during recording — the
+     * 'retain-audio' setting controls whether it's deleted after a
+     * successful session. extension.js handles that decision.
+     *
+     * @returns {string} Absolute path to the audio directory
+     */
+    _getAudioDir() {
+        let dir = this._audioDirOverride;
+        if (!dir || dir === '') {
+            dir = GLib.build_filenamev([
+                GLib.get_user_data_dir(), 'speakeasy', 'audio',
+            ]);
+        }
+        GLib.mkdir_with_parents(dir, 0o755);
+        return dir;
     }
 
     onPartialText(callback) {
@@ -287,6 +318,8 @@ export class Recorder {
         ];
         if (this._backend === 'whisper' && this._whisperLanguage)
             argv.push('--whisper-language', this._whisperLanguage);
+        if (this._audioInputDevice)
+            argv.push('--audio-device', this._audioInputDevice);
 
         log(`Speakeasy: spawning STT subprocess: ${argv.join(' ')}`);
         log(`Speakeasy:   model path resolved (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
@@ -335,9 +368,16 @@ export class Recorder {
                 this._stdin = null;
                 this._stdout = null;
 
-                // Resolve any pending stop with empty text
+                // The subprocess died unexpectedly. Cancel the
+                // watchdog (if armed) and resolve any pending stop
+                // from accumulated finals — this is the same
+                // recovery the watchdog does, just triggered by a
+                // crash instead of a timeout.
+                this._cancelStopWatchdog();
                 if (this._stopResolve) {
-                    this._stopResolve('');
+                    const synth = this._accumulatedText.join(' ').trim();
+                    log(`Speakeasy: subprocess crash recovery — synthesizing stop from ${this._accumulatedText.length} finals (${synth.length} chars)`);
+                    this._stopResolve(synth);
                     this._stopResolve = null;
                 }
             }
@@ -376,10 +416,16 @@ export class Recorder {
 
         this._accumulatedText = [];
 
-        // Generate audio path for file recording
-        const runtimeDir = GLib.getenv('XDG_RUNTIME_DIR') || '/tmp';
+        // Generate audio path for file recording. Persistent location
+        // (~/.local/share/speakeasy/audio by default) so the file
+        // survives a reboot — the previous code wrote to
+        // $XDG_RUNTIME_DIR (tmpfs) which got wiped on reboot and
+        // made retained recordings effectively invisible.
+        const audioDir = this._getAudioDir();
         const timestamp = GLib.DateTime.new_now_local().format('%Y%m%d-%H%M%S');
-        this._audioPath = `${runtimeDir}/speakeasy-${timestamp}.opus`;
+        this._audioPath = GLib.build_filenamev([
+            audioDir, `speakeasy-${timestamp}.opus`,
+        ]);
 
         this._sendCommand({cmd: 'start_file', path: this._audioPath});
         this._sendCommand({cmd: 'start'});
@@ -392,6 +438,16 @@ export class Recorder {
     /**
      * Stop recording.  Returns a Promise that resolves with the
      * accumulated transcription text when the subprocess confirms stop.
+     *
+     * Watchdog: if the subprocess does not respond with the
+     * "stopped" event within `_stopTimeoutSecs` seconds, the parent
+     * SIGKILLs the subprocess and resolves the promise with whatever
+     * final segments were already received via the `final` events.
+     * The subprocess is then automatically respawned for the next
+     * recording. This is the safety net for VOSK flush hangs — the
+     * specific failure mode that lost a long dictation session on
+     * 2026-04-08, where `current-final-results` got stuck in a busy
+     * loop and the parent waited forever.
      *
      * @returns {Promise<string>} The full transcription
      */
@@ -409,6 +465,107 @@ export class Recorder {
 
         return new Promise(resolve => {
             this._stopResolve = resolve;
+            this._armStopWatchdog();
+        });
+    }
+
+    /**
+     * Arm the watchdog timer that races against the subprocess's
+     * "stopped" event. Idempotent — if a watchdog is already armed
+     * (e.g. from a re-entered stop), it is replaced.
+     */
+    _armStopWatchdog() {
+        this._cancelStopWatchdog();
+        if (this._stopTimeoutSecs <= 0)
+            return;  // disabled by user
+        this._stopWatchdogId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT,
+            this._stopTimeoutSecs,
+            () => {
+                this._stopWatchdogId = 0;
+                this._onStopWatchdogFired();
+                return GLib.SOURCE_REMOVE;
+            }
+        );
+    }
+
+    /**
+     * Cancel the watchdog timer (called when "stopped" arrives in
+     * time, on destroy(), or when re-arming).
+     */
+    _cancelStopWatchdog() {
+        if (this._stopWatchdogId) {
+            GLib.source_remove(this._stopWatchdogId);
+            this._stopWatchdogId = 0;
+        }
+    }
+
+    /**
+     * Watchdog fired: the subprocess did not confirm stop in time.
+     *
+     * Steps:
+     *   1. Synthesize the stop result from accumulated final segments
+     *      (preserving everything VOSK already committed).
+     *   2. Resolve the pending stop promise so the caller's
+     *      _stopRecordingInner can run AI cleanup, output, transcript
+     *      save — all the post-processing the user actually cares about.
+     *   3. SIGKILL the wedged subprocess. The existing wait_async
+     *      handler will fire when the kill takes effect, but it will
+     *      see _stopResolve is null and skip the redundant resolve.
+     *   4. Spawn a fresh subprocess in the background so the next
+     *      recording works without an explicit init() call from the
+     *      caller.
+     */
+    _onStopWatchdogFired() {
+        if (!this._stopResolve)
+            return;  // promise already resolved by the normal path
+
+        const synthesized = this._accumulatedText.join(' ').trim();
+        log(`Speakeasy: STOP WATCHDOG fired after ${this._stopTimeoutSecs}s — ` +
+            `subprocess wedged. Synthesizing stop from ${this._accumulatedText.length} ` +
+            `final segments (${synthesized.length} chars). SIGKILLing subprocess.`);
+
+        const resolve = this._stopResolve;
+        this._stopResolve = null;
+        resolve(synthesized);
+
+        // Force-kill the wedged subprocess. force_exit() sends SIGKILL.
+        if (this._subprocess) {
+            try {
+                this._subprocess.force_exit();
+            } catch (e) {
+                log(`Speakeasy: force_exit failed: ${e.message}`);
+            }
+        }
+
+        // Re-launch a fresh subprocess so the next recording works.
+        // The old subprocess's wait_async handler will run when the
+        // kill is reaped, clearing _subprocess to null. Until then
+        // _dyingSubprocess holds the reference, so init() will defer
+        // the new spawn until the old one is fully dead.
+        this._scheduleRespawn();
+    }
+
+    /**
+     * After a watchdog kill, schedule a fresh subprocess spawn. We
+     * track the dying subprocess so init() doesn't try to spawn a
+     * second copy while the old one is still tearing down.
+     */
+    _scheduleRespawn() {
+        if (this._subprocess) {
+            this._dyingSubprocess = this._subprocess;
+            // Don't null _subprocess here — the wait_async handler
+            // installed at init() time will null it when the kill
+            // is reaped. We just need to make sure init() defers
+            // until that happens.
+        }
+        // Defer the actual init() to the next main-loop iteration so
+        // the killed subprocess has a chance to be reaped before we
+        // try to spawn a replacement.
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            log('Speakeasy: respawning STT subprocess after watchdog kill');
+            this.init();
+            return GLib.SOURCE_REMOVE;
         });
     }
 
@@ -524,6 +681,7 @@ export class Recorder {
             case 'stopped': {
                 const text = msg.text || this._accumulatedText.join(' ').trim();
                 log(`Speakeasy: recording stopped, text: "${text}"`);
+                this._cancelStopWatchdog();
                 if (this._stopResolve) {
                     this._stopResolve(text);
                     this._stopResolve = null;
@@ -555,6 +713,9 @@ export class Recorder {
             GLib.source_remove(this._forceKillTimerId);
             this._forceKillTimerId = 0;
         }
+
+        // Cancel the stop watchdog timer if armed.
+        this._cancelStopWatchdog();
 
         if (this._subprocess) {
             this._sendCommand({cmd: 'quit'});
