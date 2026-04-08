@@ -141,6 +141,22 @@ export class Recorder {
         return dir;
     }
 
+    /**
+     * Return the resolved model path for the current backend (the
+     * one the live STT subprocess was launched with). null until
+     * init() has resolved a model. Used by the recovery flow so it
+     * can pass the same model into a separate file-transcribe
+     * subprocess instead of re-running auto-detection in a fresh
+     * environment.
+     */
+    getModelPath() {
+        if (this._backend === 'vosk')
+            return this._voskModelPath ?? null;
+        if (this._backend === 'whisper')
+            return this._whisperModelPath ?? null;
+        return null;
+    }
+
     onPartialText(callback) {
         this._onPartialText = callback;
     }

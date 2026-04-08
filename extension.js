@@ -899,7 +899,12 @@ export default class SpeakeasyExtension extends Extension {
 
         const transcriber = new FileTranscriber({
             extensionDir: this.path,
-            modelPath: null,  // auto-detect
+            // Reuse the live recorder's resolved model path so the
+            // subprocess doesn't re-run auto-detection. The recorder
+            // has already resolved this from settings or from
+            // ~/.cache/vosk discovery, and that path is the
+            // authoritative one for this user's environment.
+            modelPath: this._recorder?.getModelPath?.() ?? null,
             onLoading: () => dialog.onLoading(),
             onReady: () => dialog.onReady(),
             onProgress: (info) => dialog.onProgress(info),

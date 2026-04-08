@@ -399,7 +399,9 @@ app.connect('activate', () => {
         let totalFinals = 0;
         const transcriber = new FileTranscriber({
             extensionDir: PROJECT_DIR,
-            modelPath: null,
+            // Reuse the live recorder's resolved model path so the
+            // subprocess doesn't re-run auto-detection.
+            modelPath: recorder.getModelPath?.() ?? null,
             onLoading: () => {
                 stateLabel.set_markup('<b>State:</b> recovery — loading model');
             },
