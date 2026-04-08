@@ -26,34 +26,16 @@ class SpeakeasyTranscriptDialog extends ModalDialog.ModalDialog {
         super._init({styleClass: 'speakeasy-transcript-dialog'});
 
         this._onClear = options.onClear ?? null;
-        this._showRaw = false;
-        this._rows = [];          // {entry, textLabel, copyButton}
+        this._rows = [];          // {entry, textLabel, toggleButton, showRaw}
         this._feedbackTimerIds = [];
 
-        // ── Title bar: label + toggle button ──
-        const titleBar = new St.BoxLayout({x_expand: true});
-
+        // ── Title ──
         const title = new St.Label({
             text: 'Transcript History',
             style_class: 'speakeasy-transcript-title',
             x_expand: true,
-            y_align: Clutter.ActorAlign.CENTER,
         });
-        titleBar.add_child(title);
-
-        // Only show the toggle if at least one entry has AI cleanup
-        const hasAI = transcripts.some(e => e.aiEnabled && e.rawText !== e.cleanedText);
-        if (hasAI) {
-            this._toggleButton = new St.Button({
-                style_class: 'speakeasy-transcript-toggle-button',
-                child: new St.Label({text: 'Show Raw'}),
-                y_align: Clutter.ActorAlign.CENTER,
-            });
-            this._toggleButton.connect('clicked', () => this._toggleView());
-            titleBar.add_child(this._toggleButton);
-        }
-
-        this.contentLayout.add_child(titleBar);
+        this.contentLayout.add_child(title);
 
         // ── Scrollable content area ──
         const scrollView = new St.ScrollView({
@@ -105,19 +87,13 @@ class SpeakeasyTranscriptDialog extends ModalDialog.ModalDialog {
     }
 
     /**
-     * Toggle all rows between cleaned and raw text.
+     * Toggle a single row between cleaned and raw text.
+     * @param {object} row - {entry, textLabel, toggleButton, showRaw}
      */
-    _toggleView() {
-        this._showRaw = !this._showRaw;
-
-        if (this._toggleButton)
-            this._toggleButton.child.text = this._showRaw ? 'Show Cleaned' : 'Show Raw';
-
-        for (const row of this._rows) {
-            const {entry, textLabel} = row;
-            if (entry.aiEnabled && entry.rawText !== entry.cleanedText)
-                textLabel.text = this._showRaw ? entry.rawText : entry.cleanedText;
-        }
+    _toggleRow(row) {
+        row.showRaw = !row.showRaw;
+        row.textLabel.text = row.showRaw ? row.entry.rawText : row.entry.cleanedText;
+        row.toggleButton.child.text = row.showRaw ? 'Show Cleaned' : 'Show Raw';
     }
 
     /**
@@ -156,6 +132,18 @@ class SpeakeasyTranscriptDialog extends ModalDialog.ModalDialog {
         });
         headerBox.add_child(header);
 
+        // Per-row toggle button — only for entries with AI cleanup
+        const hasAI = entry.aiEnabled && entry.rawText !== entry.cleanedText;
+        let toggleButton = null;
+        if (hasAI) {
+            toggleButton = new St.Button({
+                style_class: 'speakeasy-transcript-toggle-button',
+                child: new St.Label({text: 'Show Raw'}),
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+            headerBox.add_child(toggleButton);
+        }
+
         // Copy button — copies whichever version is currently displayed
         const copyButton = new St.Button({
             style_class: 'speakeasy-transcript-copy-button',
@@ -164,26 +152,6 @@ class SpeakeasyTranscriptDialog extends ModalDialog.ModalDialog {
                 icon_size: 14,
             }),
             y_align: Clutter.ActorAlign.CENTER,
-        });
-        copyButton.connect('clicked', () => {
-            const text = this._showRaw ? entry.rawText : entry.cleanedText;
-            St.Clipboard.get_default().set_text(
-                St.ClipboardType.CLIPBOARD, text);
-            // Brief visual feedback: swap icon to a checkmark
-            copyButton.child.icon_name = 'object-select-symbolic';
-            const timerId = GLib.timeout_add(
-                GLib.PRIORITY_DEFAULT, 1500, () => {
-                    const idx = this._feedbackTimerIds.indexOf(timerId);
-                    if (idx !== -1)
-                        this._feedbackTimerIds.splice(idx, 1);
-                    try {
-                        copyButton.child.icon_name = 'edit-copy-symbolic';
-                    } catch (_e) {
-                        // Widget may already be destroyed
-                    }
-                    return GLib.SOURCE_REMOVE;
-                });
-            this._feedbackTimerIds.push(timerId);
         });
         headerBox.add_child(copyButton);
 
@@ -202,7 +170,35 @@ class SpeakeasyTranscriptDialog extends ModalDialog.ModalDialog {
         row.add_child(textLabel);
 
         // Track for toggle
-        this._rows.push({entry, textLabel, copyButton});
+        const rowData = {entry, textLabel, toggleButton, showRaw: false};
+        this._rows.push(rowData);
+
+        // Wire up toggle button
+        if (toggleButton) {
+            toggleButton.connect('clicked', () => this._toggleRow(rowData));
+        }
+
+        // Wire up copy button
+        copyButton.connect('clicked', () => {
+            const text = rowData.showRaw ? entry.rawText : entry.cleanedText;
+            St.Clipboard.get_default().set_text(
+                St.ClipboardType.CLIPBOARD, text);
+            // Brief visual feedback: swap icon to a checkmark
+            copyButton.child.icon_name = 'object-select-symbolic';
+            const timerId = GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT, 1500, () => {
+                    const idx = this._feedbackTimerIds.indexOf(timerId);
+                    if (idx !== -1)
+                        this._feedbackTimerIds.splice(idx, 1);
+                    try {
+                        copyButton.child.icon_name = 'edit-copy-symbolic';
+                    } catch (_e) {
+                        // Widget may already be destroyed
+                    }
+                    return GLib.SOURCE_REMOVE;
+                });
+            this._feedbackTimerIds.push(timerId);
+        });
 
         return row;
     }
