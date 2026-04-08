@@ -152,7 +152,7 @@ lint:
 	  echo "eslint not found on PATH — install it (npm i -g eslint) or skip this target."; \
 	  exit 1; \
 	fi
-	eslint *.js ui/*.js tests/*.js
+	eslint *.js ui/*.js tests/*.js tools/*.js
 
 ## Tail Speakeasy log lines from the user journal.
 logs:

@@ -148,6 +148,27 @@ internal recorder methods (`_parseVoskJson`, `_parseWhisperMessage`,
 `stt-subprocess.js`. Re-enabling it would require rewriting the
 tests to drive the subprocess IPC instead.
 
+### Linting
+
+ESLint is configured via `eslint.config.js` (flat config, ESLint 9+).
+The config targets GJS / GNOME Shell extension code: ESM modules,
+ES2022, and GJS globals (`log`, `print`, `printerr`, `imports`,
+`global`, etc.) are pre-declared.
+
+```sh
+npm i -g eslint    # one-time install
+make lint          # lint *.js, ui/*.js, tests/*.js, tools/*.js
+```
+
+The ruleset is intentionally minimal — it's a smoke test for
+likely-bug patterns (undefined variables, unreachable code, duplicate
+keys, etc.), not a style enforcer. `no-unused-vars` is downgraded to
+a warning and respects the underscore-prefix convention
+(`_e`, `_unused`) the codebase already uses. `no-prototype-builtins`,
+`no-control-regex`, and `no-inner-declarations` are disabled because
+they generate noise without flagging real bugs in this codebase.
+The `schemas/` and `prompts/` directories are ignored.
+
 ### Viewing Logs
 
 ```sh
