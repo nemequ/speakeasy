@@ -891,18 +891,60 @@ export default class SpeakeasyExtension extends Extension {
     }
 
     /**
+     * Build a fresh AI backend instance configured the same way as
+     * the live one. Used by the recovery cleanup so it can never
+     * collide with an in-flight normal dictation session — both
+     * AICleanup and OllamaCleanup keep per-instance session state
+     * (active session UUID, chunk buffer, conversation history),
+     * and feeding a recovered transcript through the live instance
+     * would clobber the live state.
+     *
+     * Returns null if no AI backend is configured or if init fails.
+     * Caller is responsible for calling .destroy() when done.
+     */
+    _createIsolatedAi() {
+        if (!this._settings)
+            return null;
+        const backend = this._settings.get_string('ai-backend');
+        let ai;
+        try {
+            ai = backend === 'ollama' ? new OllamaCleanup() : new AICleanup();
+            ai.setExtensionDir(this.path);
+            ai.setSettings(this._settings);
+            if (!ai.init())
+                return null;
+        } catch (e) {
+            log(`Speakeasy: failed to create isolated AI: ${e.message}`);
+            return null;
+        }
+        if (!ai.isAvailable()) {
+            ai.destroy();
+            return null;
+        }
+        return ai;
+    }
+
+    /**
      * Run a one-shot AI cleanup pass on a recovered transcript.
-     * This is a "synthetic session" — we begin a fresh AI session,
-     * feed the entire raw text in one chunk, finalize, and then
-     * rewrite the saved transcript JSON with the cleaned text.
+     * This is a "synthetic session" — we begin a fresh AI session
+     * on a *separate, isolated* AI instance, feed the entire raw
+     * text in one chunk, finalize, then rewrite the saved
+     * transcript JSON with the cleaned text. Using an isolated
+     * instance means a normal recording can be in progress at the
+     * same time without interference.
      */
     _runRecoveryAiCleanup(entry, audioPath, rawText) {
-        log(`Speakeasy: running AI cleanup on recovered transcript (${rawText.length} chars)`);
+        const isolatedAi = this._createIsolatedAi();
+        if (!isolatedAi) {
+            log('Speakeasy: skipping recovery AI cleanup (no isolated AI available)');
+            return;
+        }
+        log(`Speakeasy: running AI cleanup on recovered transcript (${rawText.length} chars) on isolated instance`);
         (async () => {
             try {
-                await this._ai.beginSession();
-                this._ai.feedText(rawText);
-                const cleaned = await this._ai.finalize(null);
+                await isolatedAi.beginSession();
+                isolatedAi.feedText(rawText);
+                const cleaned = await isolatedAi.finalize(null);
                 if (!cleaned || cleaned.trim() === '') {
                     log('Speakeasy: AI cleanup returned empty for recovery');
                     return;
@@ -936,6 +978,9 @@ export default class SpeakeasyExtension extends Extension {
                 entry.aiEnabled = true;
             } catch (e) {
                 log(`Speakeasy: recovery AI cleanup failed: ${e.message}`);
+            } finally {
+                // Always release the isolated AI's HTTP session.
+                try { isolatedAi.destroy(); } catch (_e) { /* ignore */ }
             }
         })();
     }
