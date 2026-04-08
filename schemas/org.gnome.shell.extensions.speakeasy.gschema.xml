@@ -97,6 +97,17 @@
       </description>
     </key>
 
+    <!-- PulseAudio/PipeWire source device name. Empty = system default -->
+    <key name="audio-input-device" type="s">
+      <default>''</default>
+      <summary>Audio input device</summary>
+      <description>
+        PulseAudio/PipeWire source device name for recording
+        (e.g. 'alsa_input.pci-0000_04_00.5-platform-nau8821-max.HiFi__Internal_Mic__source').
+        Leave empty to use the system default input device.
+      </description>
+    </key>
+
     <!-- Path to vosk model directory. Empty = auto-detect -->
     <key name="vosk-model-path" type="s">
       <default>''</default>

@@ -4,6 +4,7 @@
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
 import {
     ExtensionPreferences,
@@ -130,6 +131,23 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             title: _('Speech Recognition'),
             icon_name: 'audio-input-microphone-symbolic',
         });
+
+        // ── Audio input group ──
+        const audioGroup = new Adw.PreferencesGroup({
+            title: _('Audio Input'),
+            description: _('Select the microphone to use for recording.'),
+        });
+        page.add(audioGroup);
+
+        const audioDeviceRow = new Adw.ComboRow({
+            title: _('Input Device'),
+            subtitle: _('System default if not set'),
+        });
+
+        // Populate with available PulseAudio/PipeWire sources
+        this._populateAudioDevices(audioDeviceRow, settings);
+
+        audioGroup.add(audioDeviceRow);
 
         // ── Backend group ──
         const backendGroup = new Adw.PreferencesGroup({
@@ -659,6 +677,64 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         dialog.add_controller(keyController);
 
         dialog.choose(window, null, null);
+    }
+
+    /**
+     * Populate an Adw.ComboRow with available PulseAudio/PipeWire
+     * audio input sources.  The first entry is always "System Default".
+     */
+    _populateAudioDevices(comboRow, settings) {
+        const names = [''];          // device names ('' = default)
+        const labels = ['System Default'];
+
+        // Enumerate sources via pactl
+        try {
+            const [ok, stdout] = GLib.spawn_command_line_sync(
+                'pactl list sources short');
+            if (ok && stdout) {
+                const lines = new TextDecoder().decode(stdout).trim().split('\n');
+                for (const line of lines) {
+                    const parts = line.split('\t');
+                    if (parts.length < 2)
+                        continue;
+                    const name = parts[1];
+                    // Skip monitor sources (output loopbacks)
+                    if (name.includes('.monitor'))
+                        continue;
+                    names.push(name);
+                    // Build a readable label from the device name
+                    const label = name
+                        .replace(/^alsa_input\./, '')
+                        .replace(/^alsa_output\./, '')
+                        .replace(/\./g, ' ')
+                        .replace(/__/g, ' — ')
+                        .replace(/_/g, ' ');
+                    labels.push(label);
+                }
+            }
+        } catch (e) {
+            log(`Speakeasy prefs: failed to enumerate audio devices: ${e.message}`);
+        }
+
+        comboRow.model = Gtk.StringList.new(labels);
+
+        // Select current device
+        const current = settings.get_string('audio-input-device');
+        const idx = names.indexOf(current);
+        comboRow.selected = idx >= 0 ? idx : 0;
+
+        comboRow.connect('notify::selected', () => {
+            const sel = comboRow.selected;
+            if (sel >= 0 && sel < names.length)
+                settings.set_string('audio-input-device', names[sel]);
+        });
+
+        settings.connect('changed::audio-input-device', () => {
+            const val = settings.get_string('audio-input-device');
+            const i = names.indexOf(val);
+            if (i >= 0)
+                comboRow.selected = i;
+        });
     }
 
     /**

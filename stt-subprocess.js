@@ -58,10 +58,11 @@ const CAPS_STR = 'audio/x-raw,format=S16LE,rate=16000,channels=1';
 const INTERAUDIO_CHANNEL = 'speakeasy-stt';
 
 class SttSubprocess {
-    constructor(backend, modelPath, whisperLanguage = 'en') {
+    constructor(backend, modelPath, whisperLanguage = 'en', audioDevice = '') {
         this.backend = backend;
         this.modelPath = modelPath;
         this.whisperLanguage = whisperLanguage;
+        this.audioDevice = audioDevice;
 
         this.loop = null;
         this.sttPipeline = null;
@@ -192,8 +193,11 @@ class SttSubprocess {
         }
 
         // Create capture pipeline with level element for audio visualization
+        const pulseSrc = this.audioDevice
+            ? `pulsesrc device="${this.audioDevice}" blocksize=3200`
+            : 'pulsesrc blocksize=3200';
         const captureDef = (
-            `pulsesrc blocksize=3200 ! ${CAPS_STR} ! ` +
+            `${pulseSrc} ! ${CAPS_STR} ! ` +
             `level name=SpeakeasyLevel interval=50000000 post-messages=true ! ` +
             `interaudiosink channel=${INTERAUDIO_CHANNEL} sync=false`
         );
@@ -325,8 +329,11 @@ class SttSubprocess {
         this.audioPath = path;
         debug(`Recording audio to ${path}`);
 
+        const filePulseSrc = this.audioDevice
+            ? `pulsesrc device="${this.audioDevice}" blocksize=3200`
+            : 'pulsesrc blocksize=3200';
         const fileDef = (
-            `pulsesrc blocksize=3200 ! ${CAPS_STR} ! ` +
+            `${filePulseSrc} ! ${CAPS_STR} ! ` +
             `queue leaky=downstream max-size-time=3000000000 ! ` +
             `opusenc bitrate=24000 ! oggmux ! ` +
             `filesink location=${path}`
@@ -572,7 +579,7 @@ function handleCommand(cmd) {
 // System.programArgs contains only the script's args, not 'gjs' or '-m'.
 // Expected: --backend vosk --model-path /path [--whisper-language en]
 function parseArgs(argv) {
-    const result = {backend: 'vosk', modelPath: '', whisperLanguage: 'en'};
+    const result = {backend: 'vosk', modelPath: '', whisperLanguage: 'en', audioDevice: ''};
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '--backend' && i + 1 < argv.length)
             result.backend = argv[++i];
@@ -580,15 +587,17 @@ function parseArgs(argv) {
             result.modelPath = argv[++i];
         else if (argv[i] === '--whisper-language' && i + 1 < argv.length)
             result.whisperLanguage = argv[++i];
+        else if (argv[i] === '--audio-device' && i + 1 < argv.length)
+            result.audioDevice = argv[++i];
     }
     return result;
 }
 
 // --- Main ---
 const config = parseArgs(System.programArgs);
-const {backend, modelPath, whisperLanguage} = config;
+const {backend, modelPath, whisperLanguage, audioDevice} = config;
 
-const stt = new SttSubprocess(backend, modelPath, whisperLanguage);
+const stt = new SttSubprocess(backend, modelPath, whisperLanguage, audioDevice);
 
 if (!stt.init()) {
     debug('Failed to initialize STT pipeline');
