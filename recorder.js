@@ -17,34 +17,14 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 
-// GStreamer is imported lazily on the first init() call so
-// recorder.init() can do a synchronous plugin-availability check
-// (see checkGstElement). We don't use a static `import` here
-// because that would add GStreamer's startup cost to every load of
-// this module (including tests that never init() a recorder).
-// _loadGstOnce() caches the resolved module — idempotent, cheap.
-let _Gst = null;
-let _gstLoadAttempted = false;
-function _loadGstOnce() {
-    if (_gstLoadAttempted)
-        return _Gst;
-    _gstLoadAttempted = true;
-    try {
-        // Use the legacy `imports.gi` path: it's synchronous and
-        // works identically in both the Shell extension process and
-        // the standalone gtk-app/test gjs processes. ESM dynamic
-        // `import()` would be async and force init() to become
-        // async too, which would cascade through every caller.
-        // eslint-disable-next-line no-undef
-        _Gst = imports.gi.Gst;
-        if (_Gst && !_Gst.is_initialized())
-            _Gst.init(null);
-    } catch (e) {
-        log(`Speakeasy: could not load Gst for plugin check: ${e.message}`);
-        _Gst = null;
-    }
-    return _Gst;
-}
+// GStreamer is never imported in this file. It lives entirely in the
+// STT subprocess — loading it here would run Gst.init() (a plugin
+// registry scan) synchronously on the GNOME Shell main thread, which
+// can hang the compositor when a plugin misbehaves. Confirmed on a
+// Bazzite Steam Deck after a Gaming Mode → Desktop Mode transition:
+// Gst.init() never returned and the whole desktop froze. The
+// subprocess isolates any plugin failure to a child process where it
+// can be cleanly detected and reported.
 
 /**
  * Recorder communicates with the STT subprocess to manage recording
@@ -469,36 +449,14 @@ export class Recorder {
             return false;
         }
 
-        // Check that the backend's GStreamer element is registered.
-        // This is the "gst-vosk plugin not installed" early-warning:
-        // without it, the subprocess fails deep inside Gst.parse_launch
-        // with a cryptic "no element 'vosk'" message that the user
-        // never sees. We surface it here with actionable instructions.
-        const Gst = _loadGstOnce();
-        if (Gst) {
-            const elementName = Recorder.gstElementForBackend(this._backend);
-            if (elementName) {
-                const check = Recorder.checkGstElement(
-                    elementName, (n) => Gst.ElementFactory.find(n));
-                if (!check.ok) {
-                    const pkg = elementName === 'vosk'
-                        ? 'gstreamer1-plugin-vosk'
-                        : `gstreamer1-plugin-${elementName}`;
-                    const msg = `GStreamer plugin missing: no element "${elementName}". ` +
-                                `Install ${pkg} (Fedora: sudo dnf install ${pkg}) ` +
-                                `or your distro's equivalent.`;
-                    log(`Speakeasy: ${msg}`);
-                    this._lastInitFailureReason = {
-                        kind: 'missing-gst-plugin',
-                        backend: this._backend,
-                        element: elementName,
-                        pkg,
-                        message: msg,
-                    };
-                    return false;
-                }
-            }
-        }
+        // Checking that the backend's GStreamer element is registered
+        // is intentionally deferred to the subprocess. See the comment
+        // at the top of this file: calling Gst.init() in the Shell
+        // process has hung compositors. The subprocess calls
+        // Gst.parse_launch(), which fails cleanly with a "no element"
+        // error if the plugin is missing, and the 30s ready watchdog
+        // in extension.js surfaces that to the user (see journalctl
+        // for the specific element name).
 
         const scriptPath = GLib.build_filenamev([
             this._extensionDir, 'stt-subprocess.js',
