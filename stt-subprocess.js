@@ -58,11 +58,12 @@ const CAPS_STR = 'audio/x-raw,format=S16LE,rate=16000,channels=1';
 const INTERAUDIO_CHANNEL = 'speakeasy-stt';
 
 class SttSubprocess {
-    constructor(backend, modelPath, whisperLanguage = 'en', audioDevice = '') {
+    constructor(backend, modelPath, whisperLanguage = 'en', audioDevice = '', interaudioChannel = 'speakeasy-stt') {
         this.backend = backend;
         this.modelPath = modelPath;
         this.whisperLanguage = whisperLanguage;
         this.audioDevice = audioDevice;
+        this.interaudioChannel = interaudioChannel;
 
         this.loop = null;
         this.sttPipeline = null;
@@ -82,15 +83,15 @@ class SttSubprocess {
         let pipelineDef;
         if (this.backend === 'vosk') {
             pipelineDef = (
-                `interaudiosrc channel=${INTERAUDIO_CHANNEL} ! ${CAPS_STR} ! ` +
+                `interaudiosrc channel=${this.interaudioChannel} ! ${CAPS_STR} ! ` +
                 'vosk name=SpeakeasyStt enable-denoise=true ! ' +
-                'fakesink'
+                'fakesink sync=false async=false'
             );
         } else if (this.backend === 'whisper') {
             pipelineDef = (
-                `interaudiosrc channel=${INTERAUDIO_CHANNEL} ! ${CAPS_STR} ! ` +
+                `interaudiosrc channel=${this.interaudioChannel} ! ${CAPS_STR} ! ` +
                 'whisper name=SpeakeasyStt ! ' +
-                'fakesink'
+                'fakesink sync=false async=false'
             );
         } else {
             send({event: 'error', message: `Unknown backend: ${this.backend}`});
@@ -146,7 +147,14 @@ class SttSubprocess {
             return false;
         }
 
-        debug('STT pipeline running, model loaded');
+        // Wait for the model to actually finish loading (reach PLAYING state)
+        // so that the first recording is truly instant.
+        const [ok, state, _pending] = this.sttPipeline.get_state(Gst.SECOND * 20);
+        if (ok === Gst.StateChangeReturn.FAILURE || state !== Gst.State.PLAYING) {
+            // Log to stderr for system visibility if it fails
+            debug(`WARNING: STT pipeline failed to reach PLAYING state (state=${Gst.Element.state_get_name(state)})`);
+        }
+
         this._logMemory('after init');
 
         // Periodic memory stats
@@ -186,7 +194,7 @@ class SttSubprocess {
         // Flush stale results
         if (this.backend === 'vosk' && this.sttElement) {
             try {
-                void this.sttElement.get_property('current-final-results');
+                void this.sttElement['current-final-results'];
             } catch (e) {
                 // Ignore
             }
@@ -199,7 +207,7 @@ class SttSubprocess {
         const captureDef = (
             `${pulseSrc} ! ${CAPS_STR} ! ` +
             `level name=SpeakeasyLevel interval=50000000 post-messages=true ! ` +
-            `interaudiosink channel=${INTERAUDIO_CHANNEL} sync=false`
+            `interaudiosink channel=${this.interaudioChannel} sync=false async=false`
         );
         try {
             this.capturePipeline = Gst.parse_launch(captureDef);
@@ -273,7 +281,7 @@ class SttSubprocess {
 
         if (this.backend === 'vosk' && this.sttElement) {
             try {
-                const finalJson = this.sttElement.get_property('current-final-results');
+                const finalJson = this.sttElement['current-final-results'];
                 debug(`Final flush result: ${finalJson}`);
                 if (finalJson) {
                     // Parse the flush result.  If it's a proper final
@@ -614,7 +622,13 @@ function handleCommand(cmd) {
 // System.programArgs contains only the script's args, not 'gjs' or '-m'.
 // Expected: --backend vosk --model-path /path [--whisper-language en]
 function parseArgs(argv) {
-    const result = {backend: 'vosk', modelPath: '', whisperLanguage: 'en', audioDevice: ''};
+    const result = {
+        backend: 'vosk',
+        modelPath: '',
+        whisperLanguage: 'en',
+        audioDevice: '',
+        interaudioChannel: 'speakeasy-stt',
+    };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '--backend' && i + 1 < argv.length)
             result.backend = argv[++i];
@@ -624,15 +638,17 @@ function parseArgs(argv) {
             result.whisperLanguage = argv[++i];
         else if (argv[i] === '--audio-device' && i + 1 < argv.length)
             result.audioDevice = argv[++i];
+        else if (argv[i] === '--interaudio-channel' && i + 1 < argv.length)
+            result.interaudioChannel = argv[++i];
     }
     return result;
 }
 
 // --- Main ---
 const config = parseArgs(System.programArgs);
-const {backend, modelPath, whisperLanguage, audioDevice} = config;
+const {backend, modelPath, whisperLanguage, audioDevice, interaudioChannel} = config;
 
-const stt = new SttSubprocess(backend, modelPath, whisperLanguage, audioDevice);
+const stt = new SttSubprocess(backend, modelPath, whisperLanguage, audioDevice, interaudioChannel);
 
 if (!stt.init()) {
     debug('Failed to initialize STT pipeline');

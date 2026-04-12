@@ -82,6 +82,9 @@ export class Recorder {
         // Tracks a subprocess that is shutting down but hasn't exited yet.
         // init() waits for this to resolve before spawning a new process.
         this._dyingSubprocess = null;
+
+        // Unique ID for this instance to prevent interaudio channel collisions
+        this._instanceId = Math.random().toString(36).substring(2, 8);
     }
 
     /**
@@ -466,6 +469,7 @@ export class Recorder {
             'gjs', '-m', scriptPath,
             '--backend', this._backend,
             '--model-path', modelPath,
+            '--interaudio-channel', `speakeasy-stt-${this._instanceId}`,
         ];
         if (this._backend === 'whisper' && this._whisperLanguage)
             argv.push('--whisper-language', this._whisperLanguage);
@@ -503,6 +507,9 @@ export class Recorder {
 
         // Read subprocess stdout asynchronously
         this._readNextLine();
+
+        // Read subprocess stderr asynchronously
+        this._readStderr();
 
         // Monitor for unexpected exit
         this._subprocess.wait_async(null, (proc, result) => {
@@ -798,6 +805,43 @@ export class Recorder {
                 this._readNextLine();
             }
         );
+    }
+
+    /**
+     * Asynchronously read from subprocess stderr and log it.
+     */
+    _readStderr() {
+        if (!this._subprocess || !this._readCancellable)
+            return;
+
+        const stderrStream = this._subprocess.get_stderr_pipe();
+        const reader = new Gio.DataInputStream({
+            base_stream: stderrStream,
+            close_base_stream: true,
+        });
+
+        const readLine = () => {
+            reader.read_line_async(
+                GLib.PRIORITY_LOW, this._readCancellable,
+                (stream, result) => {
+                    let line;
+                    try {
+                        [line] = stream.read_line_finish_utf8(result);
+                    } catch (e) {
+                        if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                            return;
+                        return;
+                    }
+
+                    if (line === null)
+                        return;
+
+                    log(`Speakeasy STT: ${line}`);
+                    readLine();
+                }
+            );
+        };
+        readLine();
     }
 
     /**
