@@ -143,6 +143,21 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         storageGroup.add(retainAudioRow);
 
+        const pasteMethodRow = new Adw.ComboRow({
+            title: _('Paste Method'),
+            subtitle: _('Keyboard shortcut used to insert text into the focused application.'),
+            model: new Gtk.StringList({
+                strings: [
+                    _('Universal (Shift+Insert)'),
+                    _('Standard (Ctrl+V)'),
+                    _('Terminal (Ctrl+Shift+V)'),
+                ],
+            }),
+        });
+        settings.bind('paste-method', pasteMethodRow, 'selected',
+            Gio.SettingsBindFlags.DEFAULT);
+        storageGroup.add(pasteMethodRow);
+
         const audioDirRow = new Adw.EntryRow({
             title: _('Audio Directory'),
         });

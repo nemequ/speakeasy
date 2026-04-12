@@ -33,6 +33,28 @@ const RESTORE_DELAY_MS = 250;
 export class Output {
     constructor() {
         this._virtualDevice = null;
+        this._settings = null;
+        this._settingsChangedIds = [];
+        this._pasteMethod = 'shift-insert';
+    }
+
+    /**
+     * Configure from a GSettings object.
+     * @param {Gio.Settings} settings
+     */
+    setSettings(settings) {
+        this._settings = settings;
+        this._loadSettings();
+
+        this._settingsChangedIds.push(
+            this._settings.connect('changed::paste-method', () => this._loadSettings())
+        );
+    }
+
+    _loadSettings() {
+        if (!this._settings)
+            return;
+        this._pasteMethod = this._settings.get_string('paste-method') || 'shift-insert';
     }
 
     /**
@@ -57,7 +79,7 @@ export class Output {
      *
      * 1. Saves the current clipboard contents
      * 2. Sets the clipboard to the desired text
-     * 3. Synthesizes Shift+Insert via virtual keyboard
+     * 3. Synthesizes the configured paste shortcut via virtual keyboard
      * 4. Restores the previous clipboard contents
      *
      * @param {string} text - The text to output
@@ -74,7 +96,7 @@ export class Output {
             return true;
         }
 
-        log(`Speakeasy: pasting ${text.length} chars via clipboard`);
+        log(`Speakeasy: pasting ${text.length} chars via clipboard (method: ${this._pasteMethod})`);
 
         const clipboard = St.Clipboard.get_default();
 
@@ -86,7 +108,19 @@ export class Output {
 
         // Wait for the clipboard to settle, then paste
         await sleep(CLIPBOARD_SETTLE_MS);
-        this._sendShiftInsert();
+        
+        switch (this._pasteMethod) {
+            case 'ctrl-v':
+                this._sendCtrlV();
+                break;
+            case 'ctrl-shift-v':
+                this._sendCtrlShiftV();
+                break;
+            case 'shift-insert':
+            default:
+                this._sendShiftInsert();
+                break;
+        }
 
         // Wait for the target app to read the clipboard, then restore
         await sleep(RESTORE_DELAY_MS);
@@ -112,23 +146,67 @@ export class Output {
     }
 
     /**
+     * Synthesize a Ctrl+V keystroke.
+     */
+    _sendCtrlV() {
+        const time = GLib.get_monotonic_time();
+        const step = 100 * 1000;
+        this._virtualDevice.notify_keyval(
+            time, Clutter.KEY_Control_L, Clutter.KeyState.PRESSED);
+        this._virtualDevice.notify_keyval(
+            time + step, Clutter.KEY_v, Clutter.KeyState.PRESSED);
+        this._virtualDevice.notify_keyval(
+            time + (step * 2), Clutter.KEY_v, Clutter.KeyState.RELEASED);
+        this._virtualDevice.notify_keyval(
+            time + (step * 3), Clutter.KEY_Control_L, Clutter.KeyState.RELEASED);
+    }
+
+    /**
+     * Synthesize a Ctrl+Shift+V keystroke.
+     */
+    _sendCtrlShiftV() {
+        const time = GLib.get_monotonic_time();
+        const step = 100 * 1000;
+        this._virtualDevice.notify_keyval(
+            time, Clutter.KEY_Control_L, Clutter.KeyState.PRESSED);
+        this._virtualDevice.notify_keyval(
+            time + step, Clutter.KEY_Shift_L, Clutter.KeyState.PRESSED);
+        this._virtualDevice.notify_keyval(
+            time + (step * 2), Clutter.KEY_v, Clutter.KeyState.PRESSED);
+        this._virtualDevice.notify_keyval(
+            time + (step * 3), Clutter.KEY_v, Clutter.KeyState.RELEASED);
+        this._virtualDevice.notify_keyval(
+            time + (step * 4), Clutter.KEY_Shift_L, Clutter.KeyState.RELEASED);
+        this._virtualDevice.notify_keyval(
+            time + (step * 5), Clutter.KEY_Control_L, Clutter.KeyState.RELEASED);
+    }
+
+    /**
      * Synthesize a Shift+Insert keystroke via the virtual keyboard.
-     * Timestamps are staggered by 1ms to ensure all backends process
+     * Timestamps are staggered by 100ms to ensure all backends process
      * the key sequence as distinct events.
      */
     _sendShiftInsert() {
         const time = GLib.get_monotonic_time();
+        const step = 100 * 1000; // 100ms in microseconds
         this._virtualDevice.notify_keyval(
             time, Clutter.KEY_Shift_L, Clutter.KeyState.PRESSED);
         this._virtualDevice.notify_keyval(
-            time + 1000, Clutter.KEY_Insert, Clutter.KeyState.PRESSED);
+            time + step, Clutter.KEY_Insert, Clutter.KeyState.PRESSED);
         this._virtualDevice.notify_keyval(
-            time + 2000, Clutter.KEY_Insert, Clutter.KeyState.RELEASED);
+            time + (step * 2), Clutter.KEY_Insert, Clutter.KeyState.RELEASED);
         this._virtualDevice.notify_keyval(
-            time + 3000, Clutter.KEY_Shift_L, Clutter.KeyState.RELEASED);
+            time + (step * 3), Clutter.KEY_Shift_L, Clutter.KeyState.RELEASED);
     }
 
     destroy() {
+        if (this._settings && this._settingsChangedIds) {
+            for (const id of this._settingsChangedIds)
+                this._settings.disconnect(id);
+            this._settingsChangedIds = [];
+        }
+        this._settings = null;
+
         if (this._virtualDevice) {
             this._virtualDevice.run_dispose();
             this._virtualDevice = null;

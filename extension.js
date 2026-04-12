@@ -50,9 +50,10 @@ export default class SpeakeasyExtension extends Extension {
         this._panelIcon = new PanelIcon();
         log(`Speakeasy:   components created (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
 
-        // Configure recorder from settings (reads stt-backend, model paths)
+        // Configure recorder and output from settings
         this._recorder.setExtensionDir(this.path);
         this._recorder.setSettings(this._settings);
+        this._output.setSettings(this._settings);
 
         // Create and configure the AI cleanup backend (Soup.Session only — fast)
         this._createAIBackend();

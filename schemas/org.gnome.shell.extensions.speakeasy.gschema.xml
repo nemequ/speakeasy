@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
+
+  <enum id="org.gnome.shell.extensions.speakeasy.PasteMethod">
+    <value nick="shift-insert" value="0"/>
+    <value nick="ctrl-v" value="1"/>
+    <value nick="ctrl-shift-v" value="2"/>
+  </enum>
+
   <schema id="org.gnome.shell.extensions.speakeasy"
           path="/org/gnome/shell/extensions/speakeasy/">
 
@@ -376,6 +383,14 @@
         empty to use ~/.local/share/speakeasy/audio. The directory
         is created automatically. Files are named
         speakeasy-YYYYMMDD-HHMMSS.opus.
+      </description>
+    </key>
+
+    <key name="paste-method" enum="org.gnome.shell.extensions.speakeasy.PasteMethod">
+      <default>'shift-insert'</default>
+      <summary>Paste method</summary>
+      <description>
+        Keyboard shortcut to use for inserting text into the focused application.
       </description>
     </key>
 
