@@ -145,15 +145,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const audioDirRow = new Adw.EntryRow({
             title: _('Audio Directory'),
-            show_apply_button: true,
-            text: settings.get_string('audio-dir'),
         });
-        audioDirRow.connect('apply', () => {
-            settings.set_string('audio-dir', audioDirRow.text);
-        });
-        settings.connect('changed::audio-dir', () => {
-            audioDirRow.text = settings.get_string('audio-dir');
-        });
+        settings.bind('audio-dir', audioDirRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         const audioBrowseButton = new Gtk.Button({
             icon_name: 'folder-open-symbolic',
             valign: Gtk.Align.CENTER,
@@ -173,15 +167,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const transcriptDirRow = new Adw.EntryRow({
             title: _('Transcript Directory'),
-            show_apply_button: true,
-            text: settings.get_string('transcript-dir'),
         });
-        transcriptDirRow.connect('apply', () => {
-            settings.set_string('transcript-dir', transcriptDirRow.text);
-        });
-        settings.connect('changed::transcript-dir', () => {
-            transcriptDirRow.text = settings.get_string('transcript-dir');
-        });
+        settings.bind('transcript-dir', transcriptDirRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         const transcriptBrowseButton = new Gtk.Button({
             icon_name: 'folder-open-symbolic',
             valign: Gtk.Align.CENTER,
@@ -313,15 +301,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const voskPathRow = new Adw.EntryRow({
             title: _('Model Path'),
-            show_apply_button: true,
-            text: settings.get_string('vosk-model-path'),
         });
-        voskPathRow.connect('apply', () => {
-            settings.set_string('vosk-model-path', voskPathRow.text);
-        });
-        settings.connect('changed::vosk-model-path', () => {
-            voskPathRow.text = settings.get_string('vosk-model-path');
-        });
+        settings.bind('vosk-model-path', voskPathRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
 
         const voskBrowseButton = new Gtk.Button({
             icon_name: 'folder-open-symbolic',
@@ -349,15 +331,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const whisperPathRow = new Adw.EntryRow({
             title: _('Model Path'),
-            show_apply_button: true,
-            text: settings.get_string('whisper-model-path'),
         });
-        whisperPathRow.connect('apply', () => {
-            settings.set_string('whisper-model-path', whisperPathRow.text);
-        });
-        settings.connect('changed::whisper-model-path', () => {
-            whisperPathRow.text = settings.get_string('whisper-model-path');
-        });
+        settings.bind('whisper-model-path', whisperPathRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
 
         const whisperBrowseButton = new Gtk.Button({
             icon_name: 'document-open-symbolic',
@@ -372,15 +348,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const whisperLangRow = new Adw.EntryRow({
             title: _('Language'),
-            show_apply_button: true,
-            text: settings.get_string('whisper-language'),
         });
-        whisperLangRow.connect('apply', () => {
-            settings.set_string('whisper-language', whisperLangRow.text);
-        });
-        settings.connect('changed::whisper-language', () => {
-            whisperLangRow.text = settings.get_string('whisper-language');
-        });
+        settings.bind('whisper-language', whisperLangRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         whisperGroup.add(whisperLangRow);
 
         return page;
@@ -434,54 +404,30 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const apiKeyRow = new Adw.PasswordEntryRow({
             title: _('API Key'),
-            show_apply_button: true,
-            text: settings.get_string('anthropic-api-key'),
         });
-        apiKeyRow.connect('apply', () => {
-            settings.set_string('anthropic-api-key', apiKeyRow.text);
-        });
-        settings.connect('changed::anthropic-api-key', () => {
-            apiKeyRow.text = settings.get_string('anthropic-api-key');
-        });
+        settings.bind('anthropic-api-key', apiKeyRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         anthropicGroup.add(apiKeyRow);
 
         const anthropicModelRow = new Adw.EntryRow({
             title: _('Model'),
-            show_apply_button: true,
-            text: settings.get_string('anthropic-model'),
         });
-        anthropicModelRow.connect('apply', () => {
-            settings.set_string('anthropic-model', anthropicModelRow.text);
-        });
-        settings.connect('changed::anthropic-model', () => {
-            anthropicModelRow.text = settings.get_string('anthropic-model');
-        });
+        settings.bind('anthropic-model', anthropicModelRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         anthropicGroup.add(anthropicModelRow);
 
         const proxyUrlRow = new Adw.EntryRow({
             title: _('Proxy URL'),
-            show_apply_button: true,
-            text: settings.get_string('proxy-url'),
         });
-        proxyUrlRow.connect('apply', () => {
-            settings.set_string('proxy-url', proxyUrlRow.text);
-        });
-        settings.connect('changed::proxy-url', () => {
-            proxyUrlRow.text = settings.get_string('proxy-url');
-        });
+        settings.bind('proxy-url', proxyUrlRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         anthropicGroup.add(proxyUrlRow);
 
         const proxyCaCertRow = new Adw.EntryRow({
             title: _('Proxy CA Certificate'),
-            show_apply_button: true,
-            text: settings.get_string('proxy-ca-cert'),
         });
-        proxyCaCertRow.connect('apply', () => {
-            settings.set_string('proxy-ca-cert', proxyCaCertRow.text);
-        });
-        settings.connect('changed::proxy-ca-cert', () => {
-            proxyCaCertRow.text = settings.get_string('proxy-ca-cert');
-        });
+        settings.bind('proxy-ca-cert', proxyCaCertRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
 
         const proxyCaBrowseButton = new Gtk.Button({
             icon_name: 'document-open-symbolic',
@@ -503,28 +449,16 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const ollamaUrlRow = new Adw.EntryRow({
             title: _('Server URL'),
-            show_apply_button: true,
-            text: settings.get_string('ollama-url'),
         });
-        ollamaUrlRow.connect('apply', () => {
-            settings.set_string('ollama-url', ollamaUrlRow.text);
-        });
-        settings.connect('changed::ollama-url', () => {
-            ollamaUrlRow.text = settings.get_string('ollama-url');
-        });
+        settings.bind('ollama-url', ollamaUrlRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         ollamaGroup.add(ollamaUrlRow);
 
         const ollamaModelRow = new Adw.EntryRow({
             title: _('Model'),
-            show_apply_button: true,
-            text: settings.get_string('ollama-model'),
         });
-        ollamaModelRow.connect('apply', () => {
-            settings.set_string('ollama-model', ollamaModelRow.text);
-        });
-        settings.connect('changed::ollama-model', () => {
-            ollamaModelRow.text = settings.get_string('ollama-model');
-        });
+        settings.bind('ollama-model', ollamaModelRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
         ollamaGroup.add(ollamaModelRow);
 
         const ollamaHint = new Adw.ActionRow({
@@ -714,15 +648,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         // System prompt path
         const systemPromptRow = new Adw.EntryRow({
             title: _('System Prompt File'),
-            show_apply_button: true,
-            text: settings.get_string('system-prompt-path'),
         });
-        systemPromptRow.connect('apply', () => {
-            settings.set_string('system-prompt-path', systemPromptRow.text);
-        });
-        settings.connect('changed::system-prompt-path', () => {
-            systemPromptRow.text = settings.get_string('system-prompt-path');
-        });
+        settings.bind('system-prompt-path', systemPromptRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
 
         const systemBrowseButton = new Gtk.Button({
             icon_name: 'document-open-symbolic',
@@ -744,15 +672,9 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         // Framing prompt path
         const framingPromptRow = new Adw.EntryRow({
             title: _('Framing Prompt File'),
-            show_apply_button: true,
-            text: settings.get_string('framing-prompt-path'),
         });
-        framingPromptRow.connect('apply', () => {
-            settings.set_string('framing-prompt-path', framingPromptRow.text);
-        });
-        settings.connect('changed::framing-prompt-path', () => {
-            framingPromptRow.text = settings.get_string('framing-prompt-path');
-        });
+        settings.bind('framing-prompt-path', framingPromptRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
 
         const framingBrowseButton = new Gtk.Button({
             icon_name: 'document-open-symbolic',
