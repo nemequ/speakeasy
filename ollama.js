@@ -103,6 +103,7 @@ export class OllamaCleanup {
         const keys = [
             'ollama-url', 'ollama-model', 'ai-enabled',
             'system-prompt-path', 'ai-request-timeout-secs',
+            'proxy-url', 'proxy-ca-cert',
         ];
         for (const key of keys) {
             this._settingsChangedIds.push(
@@ -119,9 +120,13 @@ export class OllamaCleanup {
         this._enabled = this._settings.get_boolean('ai-enabled');
         this._systemPromptPath = this._settings.get_string('system-prompt-path');
         this._requestTimeoutSecs = this._settings.get_uint('ai-request-timeout-secs');
+        this._proxyUrl = this._settings.get_string('proxy-url');
+        this._proxyCaCert = this._settings.get_string('proxy-ca-cert');
 
-        if (this._session)
+        if (this._session) {
+            this._configureSessionProxy();
             this._applySessionTimeout();
+        }
     }
 
     /**
@@ -130,8 +135,32 @@ export class OllamaCleanup {
      */
     init() {
         this._session = new Soup.Session();
+        this._configureSessionProxy();
         this._applySessionTimeout();
         return true;
+    }
+
+    /**
+     * Configure proxy and TLS settings on the Soup.Session.
+     */
+    _configureSessionProxy() {
+        if (this._proxyUrl) {
+            const resolver = Gio.SimpleProxyResolver.new(this._proxyUrl, null);
+            this._session.set_property('proxy-resolver', resolver);
+        } else {
+            this._session.set_property('proxy-resolver',
+                Gio.ProxyResolver.get_default());
+        }
+
+        this._proxyCaCertObj = null;
+        if (this._proxyCaCert) {
+            try {
+                this._proxyCaCertObj = Gio.TlsCertificate.new_from_file(
+                    this._proxyCaCert);
+            } catch (e) {
+                console.error(`[Speakeasy] Failed to load proxy CA cert: ${e.message}`);
+            }
+        }
     }
 
     /**
@@ -367,6 +396,18 @@ export class OllamaCleanup {
             'application/json',
             new GLib.Bytes(jsonBytes)
         );
+
+        // Validate server certificate against proxy CA if configured
+        if (this._proxyCaCertObj) {
+            const caSubject = this._proxyCaCertObj.get_subject_name();
+            msg.connect('accept-certificate', (_msg, cert, errors) => {
+                if (errors === 0)
+                    return true;
+                if (errors !== 1) // 1 = UNKNOWN_CA
+                    return false;
+                return cert.get_issuer_name() === caSubject;
+            });
+        }
 
         const inputStream = await new Promise((resolve, reject) => {
             this._session.send_async(
