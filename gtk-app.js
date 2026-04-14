@@ -97,6 +97,12 @@ const app = new Gtk.Application({
 app.connect('activate', () => {
     const settings = loadSettings();
 
+    // Migrate user to dlgo backend for testing if they are still on vosk
+    if (settings.get_string('stt-backend') === 'vosk') {
+        print('[gtk-app] migrating stt-backend to dlgo');
+        settings.set_string('stt-backend', 'dlgo');
+    }
+
     // Recover any orphan session logs from a previous crash.
     try {
         const transcriptDir = GLib.build_filenamev([
@@ -171,7 +177,7 @@ app.connect('activate', () => {
     });
     statusBox.append(stateLabel);
 
-    const backendLabel = new Gtk.Label({label: 'Backend:', xalign: 1});
+    const backendLabel = new Gtk.Label({label: 'AI Backend:', xalign: 1});
     statusBox.append(backendLabel);
 
     const backendCombo = new Gtk.DropDown({
@@ -180,6 +186,45 @@ app.connect('activate', () => {
     const currentBackend = settings.get_string('ai-backend');
     backendCombo.selected = currentBackend === 'ollama' ? 1 : 0;
     statusBox.append(backendCombo);
+
+    // ── STT Backend ──
+    const sttLabel = new Gtk.Label({label: 'STT Backend:', xalign: 1});
+    statusBox.append(sttLabel);
+
+    const sttCombo = new Gtk.DropDown({
+        model: Gtk.StringList.new(['Vosk', 'Whisper', 'dlgo (Go)']),
+    });
+    const currentStt = settings.get_string('stt-backend');
+    sttCombo.selected = currentStt === 'dlgo' ? 2 : (currentStt === 'whisper' ? 1 : 0);
+    statusBox.append(sttCombo);
+
+    const sttPathEntry = new Gtk.Entry({
+        placeholder_text: 'Model path (empty for auto)',
+        hexpand: true,
+    });
+    const updateSttPathValue = () => {
+        const backend = settings.get_string('stt-backend');
+        const key = backend === 'vosk' ? 'vosk-model-path' : 'whisper-model-path';
+        sttPathEntry.text = settings.get_string(key);
+    };
+    updateSttPathValue();
+    root.append(sttPathEntry);
+
+    sttCombo.connect('notify::selected', () => {
+        const opts = ['vosk', 'whisper', 'dlgo'];
+        const sel = opts[sttCombo.selected];
+        settings.set_string('stt-backend', sel);
+        updateSttPathValue();
+        // Trigger recorder re-init
+        print(`[gtk-app] STT backend changed to ${sel}, please restart app to reload model`);
+    });
+
+    sttPathEntry.connect('activate', () => {
+        const backend = settings.get_string('stt-backend');
+        const key = backend === 'vosk' ? 'vosk-model-path' : 'whisper-model-path';
+        settings.set_string(key, sttPathEntry.text);
+        print(`[gtk-app] STT model path updated to ${sttPathEntry.text}`);
+    });
 
     backendCombo.connect('notify::selected', () => {
         const opts = ['anthropic', 'ollama', 'none'];
@@ -382,6 +427,8 @@ app.connect('activate', () => {
         startBtn.sensitive = controller.getState() === ControllerState.IDLE;
         testBtn.sensitive = controller.getState() === ControllerState.IDLE;
     });
+    recorder.onExit(msg => showStartupError(msg));
+    recorder.onError(msg => showStartupError(`STT subprocess error: ${msg}`));
     if (!recorder.init()) {
         const reason = recorder.getLastInitFailureReason?.();
         showStartupError(reason?.message ??
