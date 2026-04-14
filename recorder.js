@@ -57,6 +57,8 @@ export class Recorder {
         this._onFinalText = null;
         this._onReady = null;
         this._onLevel = null;
+        this._onExit = null;
+        this._onError = null;
 
         // Pending stop — resolved when the subprocess sends "stopped"
         // OR when the watchdog timer fires (in which case we SIGKILL
@@ -199,6 +201,22 @@ export class Recorder {
         this._onReady = callback;
     }
 
+    /**
+     * Set a callback for when the subprocess exits unexpectedly.
+     * @param {function(string)} callback
+     */
+    onExit(callback) {
+        this._onExit = callback;
+    }
+
+    /**
+     * Set a callback for when the subprocess sends an error event.
+     * @param {function(string)} callback
+     */
+    onError(callback) {
+        this._onError = callback;
+    }
+
     // ─── Model detection ────────────────────────────────────────────
 
     static detectVoskModelPath() {
@@ -242,6 +260,7 @@ export class Recorder {
 
     static detectWhisperModelPath() {
         const modelDirs = [
+            GLib.get_home_dir() + '/.cache/speakeasy/models',
             GLib.get_home_dir() + '/.cache/whisper',
             GLib.get_home_dir() + '/.local/share/whisper',
             '/usr/share/whisper',
@@ -255,31 +274,55 @@ export class Recorder {
                 continue;
 
             try {
-                const enumerator = dirFile.enumerate_children(
-                    'standard::name,standard::type',
-                    Gio.FileQueryInfoFlags.NONE, null);
+                // Search recursively for .gguf or .bin
+                const search = (folder) => {
+                    const enumerator = folder.enumerate_children(
+                        'standard::name,standard::type',
+                        Gio.FileQueryInfoFlags.NONE, null);
 
-                const models = [];
-                let info;
-                while ((info = enumerator.next_file(null)) !== null) {
-                    if (info.get_file_type() !== Gio.FileType.REGULAR)
-                        continue;
-                    const name = info.get_name();
-                    if (name.startsWith('ggml-') && name.endsWith('.bin'))
-                        models.push(name);
-                }
-                enumerator.close(null);
+                    const models = [];
+                    let info;
+                    while ((info = enumerator.next_file(null)) !== null) {
+                        const name = info.get_name();
+                        const child = folder.get_child(name);
+                        if (info.get_file_type() === Gio.FileType.DIRECTORY) {
+                            models.push(...search(child));
+                        } else if (name.endsWith('.gguf') || (name.startsWith('ggml-') && name.endsWith('.bin'))) {
+                            // Verify magic for GGUF
+                            if (name.endsWith('.gguf')) {
+                                try {
+                                    const [bytes, _etag] = child.load_bytes(null);
+                                    if (bytes) {
+                                        const data = bytes.get_data();
+                                        // "GGUF" in ASCII: 0x47 0x47 0x55 0x46
+                                        if (data[0] !== 0x47 || data[1] !== 0x47 ||
+                                            data[2] !== 0x55 || data[3] !== 0x46)
+                                            continue;
+                                    }
+                                } catch (e) {
+                                    continue;
+                                }
+                            }
+                            models.push(child.get_path());
+                        }
+                    }
+                    enumerator.close(null);
+                    return models;
+                };
 
-                if (models.length === 0)
+                const allModels = search(dirFile);
+                if (allModels.length === 0)
                     continue;
 
-                models.sort((a, b) => {
-                    const aIdx = sizeOrder.findIndex(s => a.includes(s));
-                    const bIdx = sizeOrder.findIndex(s => b.includes(s));
+                allModels.sort((a, b) => {
+                    const aName = GLib.path_get_basename(a);
+                    const bName = GLib.path_get_basename(b);
+                    const aIdx = sizeOrder.findIndex(s => aName.includes(s));
+                    const bIdx = sizeOrder.findIndex(s => bName.includes(s));
                     return (aIdx === -1 ? 999 : aIdx) - (bIdx === -1 ? 999 : bIdx);
                 });
 
-                return `${dir}/${models[0]}`;
+                return allModels[0];
             } catch (e) {
                 log(`Speakeasy: error scanning ${dir}: ${e.message}`);
             }
@@ -429,13 +472,13 @@ export class Recorder {
                 return false;
             }
             this._voskModelPath = modelPath;
-        } else if (this._backend === 'whisper') {
+        } else if (this._backend === 'whisper' || this._backend === 'dlgo') {
             modelPath = this._whisperModelPath || Recorder.detectWhisperModelPath();
             if (!modelPath) {
-                log('Speakeasy: no Whisper model found');
+                log(`Speakeasy: no Whisper model found for ${this._backend}`);
                 this._lastInitFailureReason = {
                     kind: 'no-model',
-                    backend: 'whisper',
+                    backend: this._backend,
                     message: 'No Whisper model found at ~/.cache/whisper. ' +
                              'See README for installation instructions.',
                 };
@@ -462,14 +505,13 @@ export class Recorder {
         // for the specific element name).
 
         const scriptPath = GLib.build_filenamev([
-            this._extensionDir, 'stt-subprocess.js',
+            this._extensionDir, 'speakeasy-core',
         ]);
 
         const argv = [
-            'gjs', '-m', scriptPath,
+            scriptPath,
             '--backend', this._backend,
             '--model-path', modelPath,
-            '--interaudio-channel', `speakeasy-stt-${this._instanceId}`,
         ];
         if (this._backend === 'whisper' && this._whisperLanguage)
             argv.push('--whisper-language', this._whisperLanguage);
@@ -518,20 +560,32 @@ export class Recorder {
             } catch (_e) {
                 // Ignore
             }
-            const exitCode = proc.get_exit_status();
+
+            const wasReady = this._ready;
+            const ifExited = proc.get_if_exited();
+            const exitCode = ifExited ? proc.get_exit_status() : -1;
+
             if (this._subprocess === proc) {
-                log(`Speakeasy: STT subprocess exited (status=${exitCode})`);
+                log(`Speakeasy: STT subprocess exited (status=${exitCode}, exited=${ifExited})`);
                 this._ready = false;
                 this._subprocess = null;
                 this._stdin = null;
                 this._stdout = null;
 
-                // The subprocess died unexpectedly. Cancel the
-                // watchdog (if armed) and resolve any pending stop
-                // from accumulated finals — this is the same
-                // recovery the watchdog does, just triggered by a
-                // crash instead of a timeout.
+                // The subprocess died unexpectedly.
+                this.cancelReadyWatchdog();
                 this._cancelStopWatchdog();
+
+                // If it died before ready, it was a crash or OOM kill.
+                if (!wasReady && this._onExit) {
+                    let msg = `STT subprocess exited with status ${exitCode}.`;
+                    // On Linux, if it didn't exit cleanly (ifExited=false), 
+                    // it was killed by a signal (OOM, SIGKILL, etc).
+                    if (!ifExited)
+                        msg = 'STT subprocess was killed by the system (possibly Out of Memory).';
+                    this._onExit(msg);
+                }
+
                 if (this._stopResolve) {
                     const synth = this._accumulatedText.join(' ').trim();
                     log(`Speakeasy: subprocess crash recovery — synthesizing stop from ${this._accumulatedText.length} finals (${synth.length} chars)`);
@@ -886,7 +940,9 @@ export class Recorder {
                 break;
 
             case 'stopped': {
-                const text = msg.text || this._accumulatedText.join(' ').trim();
+                let text = this._accumulatedText.join(' ').trim();
+                if ('text' in msg)
+                    text = msg.text;
                 log(`Speakeasy: recording stopped, text: "${text}"`);
                 this._cancelStopWatchdog();
                 if (this._stopResolve) {
@@ -898,6 +954,10 @@ export class Recorder {
 
             case 'error':
                 log(`Speakeasy: subprocess error: ${msg.message}`);
+                if (!this._ready)
+                    this.cancelReadyWatchdog();
+                if (this._onError)
+                    this._onError(msg.message);
                 break;
 
             default:
