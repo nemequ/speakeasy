@@ -13,6 +13,7 @@ import {KeybindingManager, State} from './keybinding.js';
 import {Output} from './output.js';
 import {AICleanup} from './ai.js';
 import {OllamaCleanup} from './ollama.js';
+import {OpenRouterCleanup} from './openrouter.js';
 import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
@@ -107,6 +108,14 @@ export default class SpeakeasyExtension extends Extension {
                     log(`Speakeasy: queued start callback error: ${e.message}`);
                 }
             }
+        });
+
+        this._recorder.onExit(msg => {
+            this._notify(`Speakeasy: ${msg} See journalctl for details.`);
+        });
+
+        this._recorder.onError(msg => {
+            this._notify(`Speakeasy: STT subprocess error: ${msg}`);
         });
 
         // Spawn the STT subprocess.  This returns immediately — the
@@ -439,6 +448,9 @@ export default class SpeakeasyExtension extends Extension {
         if (backend === 'ollama') {
             log('Speakeasy: using Ollama backend');
             this._ai = new OllamaCleanup();
+        } else if (backend === 'openrouter') {
+            log('Speakeasy: using OpenRouter backend');
+            this._ai = new OpenRouterCleanup();
         } else {
             log('Speakeasy: using Anthropic backend');
             this._ai = new AICleanup();
