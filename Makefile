@@ -9,13 +9,14 @@ PACK_FILE   = $(UUID).shell-extension.zip
 # line if you want something else: `make dev DEV_TRIGGER=F13`.
 DEV_TRIGGER ?= Scroll_Lock
 
-.PHONY: all schemas test gtk dev install uninstall pack lint logs help
+.PHONY: all schemas core test gtk dev install uninstall pack lint logs help
 
-all: schemas
+all: schemas core
 
 help:
 	@echo "Speakeasy Makefile targets:"
 	@echo "  schemas    - Compile GSettings schemas (run after editing the XML)"
+	@echo "  core       - Build the Go core binary (speakeasy-core)"
 	@echo "  test       - Run all standalone unit tests under gjs"
 	@echo "  gtk        - Launch the standalone GTK test app (drives the"
 	@echo "               same dictation pipeline as the Shell extension,"
@@ -34,6 +35,11 @@ help:
 ## Compile GSettings schemas after editing the XML
 schemas:
 	glib-compile-schemas $(SCHEMA_DIR)
+
+## Build the Rust core binary
+core:
+	PATH="/home/linuxbrew/.linuxbrew/bin:$$PATH" LIBCLANG_PATH="/usr/lib64/rocm/llvm/lib" cd core && cargo build --release
+	ln -sf core/target/release/speakeasy-core speakeasy-core
 
 ## Run all tests.
 test:
@@ -57,7 +63,7 @@ test:
 ##
 ## Schemas are recompiled first so the app picks up any settings
 ## changes you've made to the XML.
-gtk: schemas
+gtk: schemas core
 	gjs -m gtk-app.js
 
 ## Launch a nested GNOME Shell session for development.
@@ -69,7 +75,7 @@ gtk: schemas
 ##
 ## The nested session uses a different trigger key than the host so
 ## both can coexist; override with `make dev DEV_TRIGGER=F13`.
-dev: schemas
+dev: schemas core
 	dbus-run-session bash -c \
 	  "gsettings set org.gnome.shell.extensions.speakeasy trigger-accels \"['$(DEV_TRIGGER)']\" \
 	   && exec gnome-shell --devkit --wayland"
@@ -80,7 +86,7 @@ dev: schemas
 ## different symlink is in the way, replace it. If a real directory
 ## is in the way, refuse — that's almost certainly a previous
 ## copy-installed version and the user should remove it deliberately.
-install:
+install: core
 	@mkdir -p "$(dir $(EXT_DIR))"
 	@if [ -L "$(EXT_DIR)" ]; then \
 	  target=$$(readlink "$(EXT_DIR)"); \
@@ -117,7 +123,7 @@ uninstall:
 ##
 ## Includes only the runtime files — no .git, no tests, no .claude,
 ## no editor cruft. Schemas are compiled fresh into the bundle.
-pack: schemas
+pack: schemas core
 	@rm -f $(PACK_FILE)
 	zip -r $(PACK_FILE) \
 	  metadata.json \
@@ -135,6 +141,7 @@ pack: schemas
 	  output.js \
 	  utils.js \
 	  stt-subprocess.js \
+	  speakeasy-core \
 	  stylesheet.css \
 	  schemas/org.gnome.shell.extensions.speakeasy.gschema.xml \
 	  schemas/gschemas.compiled \
