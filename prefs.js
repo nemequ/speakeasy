@@ -291,20 +291,26 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const backendRow = new Adw.ComboRow({
             title: _('Backend'),
-            subtitle: _('Whisper requires GStreamer 1.28.1+'),
-            model: Gtk.StringList.new(['vosk', 'whisper']),
+            subtitle: _('dlgo is recommended for best performance'),
+            model: Gtk.StringList.new(['vosk', 'whisper', 'dlgo']),
         });
         // Sync combo to setting
-        const currentBackend = settings.get_string('stt-backend');
-        backendRow.selected = currentBackend === 'whisper' ? 1 : 0;
+        const syncBackend = () => {
+            const val = settings.get_string('stt-backend');
+            if (val === 'whisper')
+                backendRow.selected = 1;
+            else if (val === 'dlgo')
+                backendRow.selected = 2;
+            else
+                backendRow.selected = 0;
+        };
+        syncBackend();
+
         backendRow.connect('notify::selected', () => {
-            const backends = ['vosk', 'whisper'];
+            const backends = ['vosk', 'whisper', 'dlgo'];
             settings.set_string('stt-backend', backends[backendRow.selected]);
         });
-        settings.connect('changed::stt-backend', () => {
-            const val = settings.get_string('stt-backend');
-            backendRow.selected = val === 'whisper' ? 1 : 0;
-        });
+        settings.connect('changed::stt-backend', syncBackend);
         backendGroup.add(backendRow);
 
         // ── VOSK group ──
@@ -396,17 +402,17 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         const backendRow = new Adw.ComboRow({
             title: _('Backend'),
-            model: Gtk.StringList.new(['Anthropic (Cloud)', 'Ollama (Local)']),
+            model: Gtk.StringList.new(['Anthropic (Cloud)', 'Ollama (Local)', 'OpenRouter (Cloud)']),
         });
         const currentBackend = settings.get_string('ai-backend');
-        backendRow.selected = currentBackend === 'ollama' ? 1 : 0;
+        backendRow.selected = currentBackend === 'ollama' ? 1 : currentBackend === 'openrouter' ? 2 : 0;
         backendRow.connect('notify::selected', () => {
-            const backends = ['anthropic', 'ollama'];
+            const backends = ['anthropic', 'ollama', 'openrouter'];
             settings.set_string('ai-backend', backends[backendRow.selected]);
         });
         settings.connect('changed::ai-backend', () => {
             const val = settings.get_string('ai-backend');
-            backendRow.selected = val === 'ollama' ? 1 : 0;
+            backendRow.selected = val === 'ollama' ? 1 : val === 'openrouter' ? 2 : 0;
         });
         backendGroup.add(backendRow);
 
@@ -482,10 +488,44 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         });
         ollamaGroup.add(ollamaHint);
 
+        // ── OpenRouter settings ──
+        const openrouterGroup = new Adw.PreferencesGroup({
+            title: _('OpenRouter'),
+            description: _('Cloud-based cleanup via OpenRouter API (OpenAI-compatible).'),
+        });
+        page.add(openrouterGroup);
+
+        const openrouterApiKeyRow = new Adw.PasswordEntryRow({
+            title: _('API Key'),
+        });
+        settings.bind('openrouter-api-key', openrouterApiKeyRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
+        openrouterGroup.add(openrouterApiKeyRow);
+
+        const openrouterUrlRow = new Adw.EntryRow({
+            title: _('API URL'),
+        });
+        settings.bind('openrouter-url', openrouterUrlRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
+        openrouterGroup.add(openrouterUrlRow);
+
+        const openrouterModelRow = new Adw.EntryRow({
+            title: _('Model'),
+        });
+        settings.bind('openrouter-model', openrouterModelRow, 'text',
+            Gio.SettingsBindFlags.DEFAULT);
+        openrouterGroup.add(openrouterModelRow);
+
+        const openrouterHint = new Adw.ActionRow({
+            title: _('Default: anthropic/claude-haiku-4-5-20251001'),
+            css_classes: ['dim-label'],
+        });
+        openrouterGroup.add(openrouterHint);
+
         // ── Robustness ──
         // Bounds the time and request size for AI calls so a slow API
         // or a long dictation session can't hang the stop-recording
-        // path. Both apply to Anthropic and Ollama.
+        // path. Both apply to Anthropic, Ollama, and OpenRouter.
         const robustGroup = new Adw.PreferencesGroup({
             title: _('Robustness'),
             description: _('Bound how long an AI request can hang and how ' +
@@ -523,9 +563,12 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         // Show/hide backend-specific groups
         const updateVisibility = () => {
-            const isOllama = settings.get_string('ai-backend') === 'ollama';
-            anthropicGroup.visible = !isOllama;
+            const backend = settings.get_string('ai-backend');
+            const isOllama = backend === 'ollama';
+            const isOpenRouter = backend === 'openrouter';
+            anthropicGroup.visible = !isOllama && !isOpenRouter;
             ollamaGroup.visible = isOllama;
+            openrouterGroup.visible = isOpenRouter;
         };
         settings.connect('changed::ai-backend', updateVisibility);
         updateVisibility();
