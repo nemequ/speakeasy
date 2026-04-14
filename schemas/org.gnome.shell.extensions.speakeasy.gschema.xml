@@ -95,12 +95,13 @@
          ============================================================ -->
 
     <key name="stt-backend" type="s">
-      <default>'vosk'</default>
+      <default>'dlgo'</default>
       <summary>Speech-to-text backend</summary>
       <description>
         Which speech recognition engine to use.
-        'vosk' — gst-vosk (streaming, CPU-based, works now).
+        'vosk' — gst-vosk (streaming, CPU-based).
         'whisper' — GStreamer whisper element (requires GStreamer 1.28.1+).
+        'dlgo' — Rust core with whisper-rs (high performance, low RAM).
       </description>
     </key>
 
@@ -125,13 +126,14 @@
       </description>
     </key>
 
-    <!-- Path to whisper model file. Empty = auto-detect -->
+    <!-- Path to whisper model file (.bin). Empty = auto-detect -->
     <key name="whisper-model-path" type="s">
       <default>''</default>
       <summary>Whisper model path</summary>
       <description>
-        Path to the Whisper model file (e.g. ggml-base.en.bin).
-        Leave empty to auto-detect from ~/.cache/whisper.
+        Path to a single Whisper model file (e.g. ggml-base.en-q5_1.bin).
+        The expected format is a GGML binary file. Leave empty to
+        auto-detect from ~/.cache/whisper.
       </description>
     </key>
 
@@ -159,7 +161,7 @@
       </description>
     </key>
 
-    <!-- AI backend: 'anthropic' (cloud) or 'ollama' (local) -->
+    <!-- AI backend: 'anthropic' (cloud), 'ollama' (local), or 'openrouter' (cloud) -->
     <key name="ai-backend" type="s">
       <default>'anthropic'</default>
       <summary>AI cleanup backend</summary>
@@ -167,6 +169,7 @@
         Which AI backend to use for text cleanup.
         'anthropic' — Anthropic Claude API (cloud, requires API key).
         'ollama' — Local Ollama server (no API key, runs on your machine).
+        'openrouter' — OpenRouter cloud service (requires API key).
       </description>
     </key>
 
@@ -223,6 +226,27 @@
         Model name for Ollama (e.g. 'qwen2.5:3b', 'llama3.2:3b',
         'qwen2.5:7b'). Must be pulled first with 'ollama pull'.
       </description>
+    </key>
+
+    <!-- OpenRouter API key -->
+    <key name="openrouter-api-key" type="s">
+      <default>''</default>
+      <summary>OpenRouter API key</summary>
+      <description>API key for the OpenRouter service.</description>
+    </key>
+
+    <!-- OpenRouter model ID -->
+    <key name="openrouter-model" type="s">
+      <default>'anthropic/claude-haiku-4-5-20251001'</default>
+      <summary>OpenRouter model</summary>
+      <description>Model ID to use for OpenRouter requests (e.g., anthropic/claude-haiku-4-5-20251001).</description>
+    </key>
+
+    <!-- OpenRouter API URL -->
+    <key name="openrouter-url" type="s">
+      <default>'https://openrouter.ai/api/v1'</default>
+      <summary>OpenRouter API URL</summary>
+      <description>Base URL for the OpenRouter API.</description>
     </key>
 
     <!-- AI request timeout. Bounds how long any single Anthropic /
