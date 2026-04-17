@@ -95,13 +95,12 @@
          ============================================================ -->
 
     <key name="stt-backend" type="s">
-      <default>'dlgo'</default>
+      <default>'whisper'</default>
       <summary>Speech-to-text backend</summary>
       <description>
         Which speech recognition engine to use.
-        'vosk' — gst-vosk (streaming, CPU-based).
         'whisper' — GStreamer whisper element (requires GStreamer 1.28.1+).
-        'dlgo' — Rust core with whisper-rs (high performance, low RAM).
+        (Removed: 'vosk', 'dlgo')
       </description>
     </key>
 
@@ -113,16 +112,6 @@
         PulseAudio/PipeWire source device name for recording
         (e.g. 'alsa_input.pci-0000_04_00.5-platform-nau8821-max.HiFi__Internal_Mic__source').
         Leave empty to use the system default input device.
-      </description>
-    </key>
-
-    <!-- Path to vosk model directory. Empty = auto-detect -->
-    <key name="vosk-model-path" type="s">
-      <default>''</default>
-      <summary>VOSK model path</summary>
-      <description>
-        Path to the VOSK speech recognition model directory.
-        Leave empty to auto-detect from ~/.cache/vosk.
       </description>
     </key>
 
@@ -161,15 +150,34 @@
       </description>
     </key>
 
-    <!-- AI backend: 'anthropic' (cloud), 'ollama' (local), or 'openrouter' (cloud) -->
+    <!-- AI API key (generic, used by backends like OpenRouter, Anthropic) -->
+    <key name="ai-api-key" type="s">
+      <default>''</default>
+      <summary>AI API Key</summary>
+      <description>
+        API key for the selected AI backend (e.g., OpenRouter, Anthropic).
+        This is a generic key; specific backends may use it.
+      </description>
+    </key>
+
+    <!-- AI model (generic, used by backends like Ollama, OpenRouter, Anthropic) -->
+    <key name="ai-model" type="s">
+      <default>''</default>
+      <summary>AI Model</summary>
+      <description>
+        The AI model to use for text cleanup (e.g., 'qwen2.5:3b', 'claude-haiku-4-5').
+        This is a generic model identifier; the specific backend interprets it.
+      </description>
+    </key>
+
+    <!-- AI backend: 'llama' (local GGUF via candle) or 'none' (skip cleanup) -->
     <key name="ai-backend" type="s">
-      <default>'anthropic'</default>
+      <default>'llama'</default>
       <summary>AI cleanup backend</summary>
       <description>
         Which AI backend to use for text cleanup.
-        'anthropic' — Anthropic Claude API (cloud, requires API key).
-        'ollama' — Local Ollama server (no API key, runs on your machine).
-        'openrouter' — OpenRouter cloud service (requires API key).
+        'llama' — Local GGUF model loaded in-process via candle (pure Rust, offline).
+        'none' — Skip AI cleanup; emit raw STT output as-is.
       </description>
     </key>
 
@@ -289,7 +297,7 @@
     <!-- Watchdog timeout for the recorder.stop() → subprocess
          "stopped" event handshake. If the subprocess wedges
          (e.g. VOSK's current-final-results flush in a busy loop),
-         the parent SIGKILLs it after this many seconds and
+         the parent kills it (SIGKILL) after this many seconds and
          synthesizes the stop result from accumulated final
          segments. Without this, a subprocess hang would freeze the
          compositor's stop-recording path indefinitely — exactly the

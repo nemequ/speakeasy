@@ -16,7 +16,7 @@ all: schemas core
 help:
 	@echo "Speakeasy Makefile targets:"
 	@echo "  schemas    - Compile GSettings schemas (run after editing the XML)"
-	@echo "  core       - Build the Go core binary (speakeasy-core)"
+	@echo "  core       - Build the Rust core binary (speakeasy)"
 	@echo "  test       - Run all standalone unit tests under gjs"
 	@echo "  gtk        - Launch the standalone GTK test app (drives the"
 	@echo "               same dictation pipeline as the Shell extension,"
@@ -39,7 +39,7 @@ schemas:
 ## Build the Rust core binary
 core:
 	PATH="/home/linuxbrew/.linuxbrew/bin:$$PATH" LIBCLANG_PATH="/usr/lib64/rocm/llvm/lib" cd core && cargo build --release
-	ln -sf core/target/release/speakeasy-core speakeasy-core
+	ln -sf core/target/release/speakeasy speakeasy
 
 ## Run all tests.
 test:
@@ -140,8 +140,7 @@ pack: schemas core
 	  ollama.js \
 	  output.js \
 	  utils.js \
-	  stt-subprocess.js \
-	  speakeasy-core \
+	  speakeasy \
 	  stylesheet.css \
 	  schemas/org.gnome.shell.extensions.speakeasy.gschema.xml \
 	  schemas/gschemas.compiled \

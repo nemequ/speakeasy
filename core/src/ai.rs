@@ -10,7 +10,7 @@ pub struct AiConfig {
     pub system_prompt: String,
 }
 
-const FRAMING_TEXT: &str = "What follows is raw output from a speech recognition engine. It will be lowercase, without punctuation, and may contain filler words, self-corrections, and false starts. All text up to the marker \"END-OF-DICTATION\" is raw dictation that needs cleanup. When you see that marker, output a properly capitalized, punctuated, and coherent version of everything that was dictated.";
+pub const FRAMING_TEXT: &str = "What follows is raw output from a speech recognition engine. It will be lowercase, without punctuation, and may contain filler words, self-corrections, and false starts. All text up to the marker \"END-OF-DICTATION\" is raw dictation that needs cleanup. When you see that marker, output a properly capitalized, punctuated, and coherent version of everything that was dictated.";
 
 #[derive(Deserialize)]
 struct ApiResponse {

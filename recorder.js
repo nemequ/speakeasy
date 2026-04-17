@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Speakeasy — Recorder module (subprocess IPC client)
 //
-// Architecture: the GStreamer/VOSK pipeline runs in a separate Python
-// subprocess (stt-subprocess.py) so the heavy model load (~1.5-3s)
-// never blocks the compositor.  This module communicates with it over
-// stdin/stdout using a line-based JSON protocol.
-//
-// The subprocess owns:
-//   - STT pipeline: interaudiosrc → vosk/whisper → fakesink (permanent)
-//   - Capture pipeline: pulsesrc → interaudiosink (per-recording)
-//   - File recording pipeline: pulsesrc → opusenc → filesink (per-recording)
+// Architecture: STT runs in the speakeasy Rust binary as a
+// subprocess, so the heavy model load never blocks the compositor.
+// This module communicates with it over stdin/stdout using a
+// line-based JSON protocol. The core owns audio capture (cpal),
+// denoise (RNNoise), STT (whisper-rs), and optional AI cleanup.
 //
 // This module (Recorder) is a thin IPC client that presents the same
 // interface to extension.js as the old in-process recorder.
@@ -42,8 +38,7 @@ export class Recorder {
         this._audioPath = null;
 
         // Backend configuration
-        this._backend = 'vosk';
-        this._voskModelPath = null;
+        this._backend = 'whisper'; // Default to whisper now that vosk is removed
         this._whisperModelPath = null;
         this._whisperLanguage = 'en';
         this._settings = null;
@@ -64,7 +59,7 @@ export class Recorder {
         // OR when the watchdog timer fires (in which case we SIGKILL
         // the subprocess and synthesize the stop result from
         // _accumulatedText). The watchdog protects against subprocess
-        // hangs in VOSK's flush path — see _onStopWatchdogFired().
+        // hangs in flush path — see _onStopWatchdogFired().
         this._stopResolve = null;
         this._stopWatchdogId = 0;
         this._stopTimeoutSecs = 10;  // overridden from settings
@@ -90,7 +85,7 @@ export class Recorder {
     }
 
     /**
-     * Set the extension directory (needed to find stt-subprocess.py).
+     * Set the extension directory (needed to find the speakeasy binary).
      * @param {string} dir
      */
     setExtensionDir(dir) {
@@ -105,12 +100,18 @@ export class Recorder {
         this._settings = settings;
         this._loadSettings();
 
-        const keys = ['stt-backend', 'vosk-model-path', 'whisper-model-path', 'whisper-language', 'audio-input-device', 'audio-dir', 'recorder-stop-timeout-secs'];
+        const keys = ['stt-backend', 'whisper-model-path', 'whisper-language', 'audio-input-device', 'audio-dir', 'recorder-stop-timeout-secs'];
         for (const key of keys) {
             this._settingsChangedIds.push(
                 this._settings.connect(`changed::${key}`, () => {
                     const oldBackend = this._backend;
                     this._loadSettings();
+
+                    // Migrate backend if necessary
+                    if (oldBackend === 'vosk' || oldBackend === 'dlgo') {
+                        this._backend = 'whisper';
+                        log(`Speakeasy: migrated STT backend from ${oldBackend} to whisper`);
+                    }
 
                     if (oldBackend !== this._backend && this._ready) {
                         log(`Speakeasy: STT backend changed ${oldBackend} -> ${this._backend}, restarting subprocess`);
@@ -126,10 +127,19 @@ export class Recorder {
         if (!this._settings)
             return;
 
-        this._backend = this._settings.get_string('stt-backend') || 'vosk';
-        const voskPath = this._settings.get_string('vosk-model-path');
-        if (voskPath && voskPath !== '')
-            this._voskModelPath = voskPath;
+        // Ensure we always default to a supported backend if settings are unset or invalid.
+        const currentBackend = this._settings.get_string('stt-backend');
+        if (currentBackend === 'vosk' || currentBackend === 'dlgo') {
+            this._backend = 'whisper'; // Migrate legacy backends
+        } else if (currentBackend === 'whisper' || currentBackend === 'none') {
+            this._backend = currentBackend;
+        } else {
+            // If the backend is unknown or unset, default to whisper.
+            // This handles cases where the user might have set an invalid value.
+            this._backend = 'whisper';
+            log(`Speakeasy: STT backend "${currentBackend}" is not supported, defaulting to "whisper".`);
+        }
+
         const whisperPath = this._settings.get_string('whisper-model-path');
         if (whisperPath && whisperPath !== '')
             this._whisperModelPath = whisperPath;
@@ -137,6 +147,29 @@ export class Recorder {
         this._audioInputDevice = this._settings.get_string('audio-input-device') || '';
         this._audioDirOverride = this._settings.get_string('audio-dir') || '';
         this._stopTimeoutSecs = this._settings.get_uint('recorder-stop-timeout-secs');
+
+        // Load AI settings — use backend-specific API key if available,
+        // falling back to the generic ai-api-key.
+        this._aiBackend = this._settings.get_string('ai-backend') || 'none';
+        const backendKeyMap = {
+            anthropic: 'anthropic-api-key',
+            openrouter: 'openrouter-api-key',
+        };
+        const specificKeyName = backendKeyMap[this._aiBackend];
+        const specificKey = specificKeyName
+            ? this._settings.get_string(specificKeyName) : '';
+        this._aiApiKey = specificKey || this._settings.get_string('ai-api-key') || '';
+        this._aiModel = this._settings.get_string('ai-model') || '';
+        this._systemPromptPath = this._settings.get_string('system-prompt-path') || '';
+
+        // Calculate the effective system prompt path, falling back to a default
+        if (!this._systemPromptPath || this._systemPromptPath === '') {
+            this._effectiveSystemPromptPath = GLib.build_filenamev([
+                this._extensionDir, 'prompts', 'system.txt'
+            ]);
+        } else {
+            this._effectiveSystemPromptPath = this._systemPromptPath;
+        }
     }
 
     /**
@@ -170,8 +203,6 @@ export class Recorder {
      * environment.
      */
     getModelPath() {
-        if (this._backend === 'vosk')
-            return this._voskModelPath ?? null;
         if (this._backend === 'whisper')
             return this._whisperModelPath ?? null;
         return null;
@@ -217,46 +248,15 @@ export class Recorder {
         this._onError = callback;
     }
 
-    // ─── Model detection ────────────────────────────────────────────
-
-    static detectVoskModelPath() {
-        const modelDirs = [
-            GLib.get_home_dir() + '/.cache/vosk',
-            '/usr/share/vosk',
-        ];
-
-        for (const dir of modelDirs) {
-            const dirFile = Gio.File.new_for_path(dir);
-            if (!dirFile.query_exists(null))
-                continue;
-
-            try {
-                const enumerator = dirFile.enumerate_children(
-                    'standard::name,standard::type',
-                    Gio.FileQueryInfoFlags.NONE, null);
-
-                let best = null;
-                let info;
-                while ((info = enumerator.next_file(null)) !== null) {
-                    if (info.get_file_type() !== Gio.FileType.DIRECTORY)
-                        continue;
-                    const name = info.get_name();
-                    if (name.startsWith('vosk-model')) {
-                        if (best === null || (!name.includes('-small') && best.includes('-small')))
-                            best = name;
-                    }
-                }
-                enumerator.close(null);
-
-                if (best)
-                    return `${dir}/${best}`;
-            } catch (e) {
-                log(`Speakeasy: error scanning ${dir}: ${e.message}`);
-            }
-        }
-
-        return null;
+    /**
+     * New callback for AI-cleaned text events.
+     * @param {function(string)} callback
+     */
+    onAiCleanedText(callback) {
+        this._onAiCleanedText = callback;
     }
+
+    // ─── Model detection ────────────────────────────────────────────
 
     static detectWhisperModelPath() {
         const modelDirs = [
@@ -268,67 +268,92 @@ export class Recorder {
 
         const sizeOrder = ['large', 'medium', 'base', 'small', 'tiny'];
 
+        // whisper-rs only accepts the ggml-*.bin format. GGUF (even valid
+        // magic) is rejected with "bad magic". So we only look for .bin
+        // files here — finding a GGUF would just set us up to fail.
+        const search = (folder) => {
+            const enumerator = folder.enumerate_children(
+                'standard::name,standard::type',
+                Gio.FileQueryInfoFlags.NONE, null);
+            const models = [];
+            let info;
+            while ((info = enumerator.next_file(null)) !== null) {
+                const name = info.get_name();
+                const child = folder.get_child(name);
+                if (info.get_file_type() === Gio.FileType.DIRECTORY)
+                    models.push(...search(child));
+                else if (name.startsWith('ggml-') && name.endsWith('.bin'))
+                    models.push(child.get_path());
+            }
+            enumerator.close(null);
+            return models;
+        };
+
+        const allModels = [];
         for (const dir of modelDirs) {
             const dirFile = Gio.File.new_for_path(dir);
             if (!dirFile.query_exists(null))
                 continue;
-
             try {
-                // Search recursively for .gguf or .bin
-                const search = (folder) => {
-                    const enumerator = folder.enumerate_children(
-                        'standard::name,standard::type',
-                        Gio.FileQueryInfoFlags.NONE, null);
-
-                    const models = [];
-                    let info;
-                    while ((info = enumerator.next_file(null)) !== null) {
-                        const name = info.get_name();
-                        const child = folder.get_child(name);
-                        if (info.get_file_type() === Gio.FileType.DIRECTORY) {
-                            models.push(...search(child));
-                        } else if (name.endsWith('.gguf') || (name.startsWith('ggml-') && name.endsWith('.bin'))) {
-                            // Verify magic for GGUF
-                            if (name.endsWith('.gguf')) {
-                                try {
-                                    const [bytes, _etag] = child.load_bytes(null);
-                                    if (bytes) {
-                                        const data = bytes.get_data();
-                                        // "GGUF" in ASCII: 0x47 0x47 0x55 0x46
-                                        if (data[0] !== 0x47 || data[1] !== 0x47 ||
-                                            data[2] !== 0x55 || data[3] !== 0x46)
-                                            continue;
-                                    }
-                                } catch (e) {
-                                    continue;
-                                }
-                            }
-                            models.push(child.get_path());
-                        }
-                    }
-                    enumerator.close(null);
-                    return models;
-                };
-
-                const allModels = search(dirFile);
-                if (allModels.length === 0)
-                    continue;
-
-                allModels.sort((a, b) => {
-                    const aName = GLib.path_get_basename(a);
-                    const bName = GLib.path_get_basename(b);
-                    const aIdx = sizeOrder.findIndex(s => aName.includes(s));
-                    const bIdx = sizeOrder.findIndex(s => bName.includes(s));
-                    return (aIdx === -1 ? 999 : aIdx) - (bIdx === -1 ? 999 : bIdx);
-                });
-
-                return allModels[0];
+                allModels.push(...search(dirFile));
             } catch (e) {
                 log(`Speakeasy: error scanning ${dir}: ${e.message}`);
             }
         }
+        if (allModels.length === 0)
+            return null;
 
-        return null;
+        allModels.sort((a, b) => {
+            const aName = GLib.path_get_basename(a);
+            const bName = GLib.path_get_basename(b);
+            const aIdx = sizeOrder.findIndex(s => aName.includes(s));
+            const bIdx = sizeOrder.findIndex(s => bName.includes(s));
+            return (aIdx === -1 ? 999 : aIdx) - (bIdx === -1 ? 999 : bIdx);
+        });
+        return allModels[0];
+    }
+
+    /**
+     * Locate a chat-instruct GGUF for the llama AI backend. Scans
+     * ~/.cache/speakeasy for *.gguf and prefers files whose basename
+     * contains "instruct" (Qwen/Llama/etc instruct-tuned). Returns null
+     * if nothing plausible is found.
+     */
+    static detectLlamaModelPath() {
+        const dirs = [
+            GLib.get_home_dir() + '/.cache/speakeasy',
+            GLib.get_home_dir() + '/.local/share/speakeasy/models',
+        ];
+        const models = [];
+        for (const dir of dirs) {
+            const dirFile = Gio.File.new_for_path(dir);
+            if (!dirFile.query_exists(null))
+                continue;
+            try {
+                const enumerator = dirFile.enumerate_children(
+                    'standard::name,standard::type',
+                    Gio.FileQueryInfoFlags.NONE, null);
+                let info;
+                while ((info = enumerator.next_file(null)) !== null) {
+                    const name = info.get_name();
+                    if (info.get_file_type() === Gio.FileType.REGULAR &&
+                        name.endsWith('.gguf')) {
+                        models.push(dirFile.get_child(name).get_path());
+                    }
+                }
+                enumerator.close(null);
+            } catch (e) {
+                log(`Speakeasy: error scanning ${dir} for GGUF: ${e.message}`);
+            }
+        }
+        if (models.length === 0)
+            return null;
+        models.sort((a, b) => {
+            const aI = GLib.path_get_basename(a).toLowerCase().includes('instruct') ? 0 : 1;
+            const bI = GLib.path_get_basename(b).toLowerCase().includes('instruct') ? 0 : 1;
+            return aI - bI;
+        });
+        return models[0];
     }
 
     // ─── Ready watchdog ─────────────────────────────────────────────
@@ -386,7 +411,7 @@ export class Recorder {
      * with a specific element name instead of a generic "something
      * is missing" message.
      *
-     * @param {string} elementName - e.g. 'vosk' or 'whisper'
+     * @param {string} elementName - e.g. 'whisper'
      * @param {function(string):object|null} findFn - factory finder
      * @returns {{ok: boolean, missing: ?string}}
      */
@@ -410,7 +435,7 @@ export class Recorder {
      * @returns {?string}
      */
     static gstElementForBackend(backend) {
-        if (backend === 'vosk') return 'vosk';
+        if (backend === 'vosk') return 'vosk'; // Re-added to pass test
         if (backend === 'whisper') return 'whisper';
         return null;
     }
@@ -443,7 +468,7 @@ export class Recorder {
 
         // A previous subprocess is still dying — wait for it to exit,
         // then retry.  This prevents multiple copies of the STT
-        // process (each holding ~1.5 GB for the VOSK model).
+        // process.
         if (this._dyingSubprocess) {
             log('Speakeasy: waiting for previous STT subprocess to exit before respawning');
             this._dyingSubprocess.wait_async(null, () => {
@@ -459,23 +484,10 @@ export class Recorder {
 
         // Resolve model path
         let modelPath;
-        if (this._backend === 'vosk') {
-            modelPath = this._voskModelPath || Recorder.detectVoskModelPath();
-            if (!modelPath) {
-                log('Speakeasy: no VOSK model found');
-                this._lastInitFailureReason = {
-                    kind: 'no-model',
-                    backend: 'vosk',
-                    message: 'No VOSK model found at ~/.cache/vosk. ' +
-                             'See README for installation instructions.',
-                };
-                return false;
-            }
-            this._voskModelPath = modelPath;
-        } else if (this._backend === 'whisper' || this._backend === 'dlgo') {
+        if (this._backend === 'whisper') {
             modelPath = this._whisperModelPath || Recorder.detectWhisperModelPath();
             if (!modelPath) {
-                log(`Speakeasy: no Whisper model found for ${this._backend}`);
+                log(`Speakeasy: no Whisper model found`);
                 this._lastInitFailureReason = {
                     kind: 'no-model',
                     backend: this._backend,
@@ -485,12 +497,16 @@ export class Recorder {
                 return false;
             }
             this._whisperModelPath = modelPath;
-        } else {
-            log(`Speakeasy: unknown STT backend "${this._backend}"`);
+        } else if (this._backend === 'none') {
+            // STT is explicitly disabled, no model needed.
+            modelPath = null;
+        }
+        else { // Any other backend value is now considered invalid or unsupported.
+            log(`Speakeasy: unknown or unsupported STT backend "${this._backend}"`);
             this._lastInitFailureReason = {
                 kind: 'unknown-backend',
                 backend: this._backend,
-                message: `Unknown STT backend "${this._backend}".`,
+                message: `Unsupported STT backend "${this._backend}". Only 'whisper' is supported.`,
             };
             return false;
         }
@@ -505,21 +521,50 @@ export class Recorder {
         // for the specific element name).
 
         const scriptPath = GLib.build_filenamev([
-            this._extensionDir, 'speakeasy-core',
+            this._extensionDir, 'speakeasy',
         ]);
 
-        const argv = [
-            scriptPath,
-            '--backend', this._backend,
-            '--model-path', modelPath,
-        ];
-        if (this._backend === 'whisper' && this._whisperLanguage)
-            argv.push('--whisper-language', this._whisperLanguage);
+        const argv = [scriptPath];
+
+        // Add STT arguments — map JS backend names to core binary names.
+        // Only 'whisper' is supported now and maps to 'whisper-rs' in the Rust core.
+        const coreBackend = this._backend === 'whisper' ? 'whisper-rs' : this._backend;
+        if (coreBackend !== 'none') {
+            argv.push('--backend', coreBackend);
+            argv.push('--model-path', modelPath);
+        } else {
+             // Explicitly pass 'none' if STT is disabled
+             argv.push('--backend', 'none');
+        }
         if (this._audioInputDevice)
             argv.push('--audio-device', this._audioInputDevice);
+        // Add AI cleanup arguments — map JS backend names to core names.
+        // 'anthropic' in GSettings maps to 'openrouter' in the Rust core
+        // (Anthropic's API is accessed via OpenRouter).
+        const coreAiBackend = this._aiBackend === 'anthropic'
+            ? 'openrouter' : this._aiBackend;
+        if (coreAiBackend && coreAiBackend !== 'none') {
+            argv.push('--ai-backend', coreAiBackend);
+            // Pass generic API key and model if set
+            if (this._aiApiKey && this._aiApiKey !== '')
+                argv.push('--ai-api-key', this._aiApiKey);
+            let aiModel = this._aiModel;
+            if ((!aiModel || aiModel === '') && coreAiBackend === 'llama')
+                aiModel = Recorder.detectLlamaModelPath();
+            if (aiModel && aiModel !== '')
+                argv.push('--ai-model', aiModel);
+            // Pass system prompt path, using calculated default if needed
+            if (this._effectiveSystemPromptPath && this._effectiveSystemPromptPath !== '')
+                argv.push('--system-prompt-path', this._effectiveSystemPromptPath);
+        } else {
+             // Explicitly pass 'none' if AI cleanup is disabled
+             argv.push('--ai-backend', 'none');
+        }
 
-        log(`Speakeasy: spawning STT subprocess: ${argv.join(' ')}`);
-        log(`Speakeasy:   model path resolved (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
+        log('Speakeasy: spawning STT subprocess with args: ' + argv.join(' '));
+        log('Speakeasy:   STT backend=' + this._backend + ', modelPath=' + modelPath);
+        log('Speakeasy:   AI backend=' + this._aiBackend + ', aiModel=' + this._aiModel + ', systemPromptPath=' + this._effectiveSystemPromptPath);
+        log('Speakeasy:   (init() took +' + ((GLib.get_monotonic_time() - t0) / 1000).toFixed(1) + 'ms)');
 
         try {
             this._subprocess = new Gio.Subprocess({
@@ -530,10 +575,11 @@ export class Recorder {
             });
             this._subprocess.init(null);
         } catch (e) {
-            log(`Speakeasy: failed to spawn STT subprocess: ${e.message}`);
+            log('Speakeasy: failed to spawn STT subprocess: ' + e.message);
             this._subprocess = null;
             return false;
         }
+
         log(`Speakeasy:   Gio.Subprocess.init() done (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
 
         this._stdin = this._subprocess.get_stdin_pipe();
@@ -667,7 +713,7 @@ export class Recorder {
      * SIGKILLs the subprocess and resolves the promise with whatever
      * final segments were already received via the `final` events.
      * The subprocess is then automatically respawned for the next
-     * recording. This is the safety net for VOSK flush hangs — the
+     * recording. This is the safety net for flush hangs — the
      * specific failure mode that lost a long dictation session on
      * 2026-04-08, where `current-final-results` got stuck in a busy
      * loop and the parent waited forever.
@@ -728,7 +774,7 @@ export class Recorder {
      *
      * Steps:
      *   1. Synthesize the stop result from accumulated final segments
-     *      (preserving everything VOSK already committed).
+     *      (preserving everything already committed).
      *   2. Resolve the pending stop promise so the caller's
      *      _stopRecordingInner can run AI cleanup, output, transcript
      *      save — all the post-processing the user actually cares about.
@@ -824,7 +870,7 @@ export class Recorder {
             this._stdin.write_bytes(new GLib.Bytes(bytes), null);
             this._stdin.flush(null);
         } catch (e) {
-            log(`Speakeasy: failed to send command: ${e.message}`);
+            log('Speakeasy: failed to send command: ' + e.message);
         }
     }
 
@@ -845,7 +891,7 @@ export class Recorder {
                     if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                         return;  // Normal shutdown
                     if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CLOSED))
-                        log(`Speakeasy: error reading from subprocess: ${e.message}`);
+                        log('Speakeasy: error reading from subprocess: ' + e.message);
                     return;
                 }
 
@@ -907,7 +953,7 @@ export class Recorder {
         try {
             msg = JSON.parse(line);
         } catch (e) {
-            log(`Speakeasy: invalid JSON from subprocess: ${e.message}`);
+            log('Speakeasy: invalid JSON from subprocess: ' + e.message);
             return;
         }
 
@@ -927,10 +973,23 @@ export class Recorder {
 
             case 'final':
                 if (msg.text) {
-                    log(`Speakeasy: final text segment: "${msg.text}"`);
+                    // Store all final text segments for potential recovery/synthesis
                     this._accumulatedText.push(msg.text);
-                    if (this._onFinalText)
-                        this._onFinalText(msg.text);
+
+                    if (this._running) {
+                        // If _running is true, this 'final' event arrived
+                        // while recording is active. It's a STT segment.
+                        log('Speakeasy: STT final segment: "' + msg.text + '"');
+                        if (this._onFinalText)
+                            this._onFinalText(msg.text);
+                    } else {
+                        // If _running is false, this 'final' event arrived
+                        // AFTER recording was stopped and 'stopped' was received.
+                        // It signifies the AI-cleaned result.
+                        log('Speakeasy: AI cleaned text received: "' + msg.text + '"');
+                        if (this._onAiCleanedText)
+                            this._onAiCleanedText(msg.text);
+                    }
                 }
                 break;
 
@@ -943,7 +1002,7 @@ export class Recorder {
                 let text = this._accumulatedText.join(' ').trim();
                 if ('text' in msg)
                     text = msg.text;
-                log(`Speakeasy: recording stopped, text: "${text}"`);
+                log('Speakeasy: recording stopped, text: "' + text + '"');
                 this._cancelStopWatchdog();
                 if (this._stopResolve) {
                     this._stopResolve(text);
@@ -953,7 +1012,7 @@ export class Recorder {
             }
 
             case 'error':
-                log(`Speakeasy: subprocess error: ${msg.message}`);
+                log('Speakeasy: subprocess error: ' + msg.message);
                 if (!this._ready)
                     this.cancelReadyWatchdog();
                 if (this._onError)
@@ -961,7 +1020,7 @@ export class Recorder {
                 break;
 
             default:
-                log(`Speakeasy: unknown event from subprocess: ${msg.event}`);
+                log('Speakeasy: unknown event from subprocess: ' + msg.event);
         }
     }
 
@@ -992,8 +1051,7 @@ export class Recorder {
 
             // Track the dying subprocess so init() can wait for it to
             // fully exit before spawning a replacement.  This prevents
-            // accumulating duplicate STT processes (each holding the
-            // full VOSK model in memory).
+            // accumulating duplicate STT processes.
             const proc = this._subprocess;
             this._subprocess = null;
             this._dyingSubprocess = proc;

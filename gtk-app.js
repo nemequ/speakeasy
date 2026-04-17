@@ -41,7 +41,7 @@ const APP_ID = 'local.speakeasy.test';
 const SCHEMA_ID = 'org.gnome.shell.extensions.speakeasy';
 
 // Resolve the project directory from this file's URL so the
-// recorder can find stt-subprocess.js and the prompts/ folder.
+// recorder can find the speakeasy binary and the prompts/ folder.
 const PROJECT_DIR = (() => {
     const [path] = GLib.filename_from_uri(import.meta.url);
     return GLib.path_get_dirname(path);
@@ -78,7 +78,9 @@ class TextViewOutput {
         const buffer = this._textView.buffer;
         const end = buffer.get_end_iter();
         const stamp = new Date().toLocaleTimeString();
-        buffer.insert(end, `[${stamp}] ${text}\n\n`, -1);
+        buffer.insert(end, `[${stamp}] ${text}
+
+`, -1);
         // Scroll to bottom
         const mark = buffer.get_insert();
         this._textView.scroll_mark_onscreen(mark);
@@ -97,10 +99,11 @@ const app = new Gtk.Application({
 app.connect('activate', () => {
     const settings = loadSettings();
 
-    // Migrate user to dlgo backend for testing if they are still on vosk
-    if (settings.get_string('stt-backend') === 'vosk') {
-        print('[gtk-app] migrating stt-backend to dlgo');
-        settings.set_string('stt-backend', 'dlgo');
+    // Migrate user to whisper backend if they are still on vosk or dlgo
+    const currentStt = settings.get_string('stt-backend');
+    if (currentStt === 'vosk' || currentStt === 'dlgo') {
+        print(`[gtk-app] migrating stt-backend from ${currentStt} to whisper`);
+        settings.set_string('stt-backend', 'whisper');
     }
 
     // Recover any orphan session logs from a previous crash.
@@ -120,7 +123,24 @@ app.connect('activate', () => {
     recorder.setExtensionDir(PROJECT_DIR);
     recorder.setSettings(settings);
 
+    // Register callback for AI-cleaned text from Rust core.
+    // This text is appended directly to the results view, as the JS
+    // AICleanup object is either a no-op or bypassed entirely when
+    // the core handles live AI cleanup.
+    recorder.onAiCleanedText((text) => {
+        // Append to result view like the AI cleanup would
+        const buffer = resultView.tv.buffer;
+        const end = buffer.get_end_iter();
+        const stamp = new Date().toLocaleTimeString();
+        buffer.insert(end, `[${stamp}] (AI cleaned) ${text}
+
+`, -1);
+        const mark = buffer.get_insert();
+        resultView.tv.scroll_mark_onscreen(mark);
+    });
+
     // ── Build the AI backend ──
+    // Create the real AI object, which is needed for recovery from file.
     function makeAi() {
         const backend = settings.get_string('ai-backend');
         const ai = backend === 'ollama' ? new OllamaCleanup() : new AICleanup();
@@ -129,7 +149,29 @@ app.connect('activate', () => {
         ai.init();
         return ai;
     }
-    let ai = makeAi();
+    const realAi = makeAi(); // Always create the real object
+
+    // Determine the AI object to pass to the DictationController for live use.
+    // If the Rust core is configured with an AI backend (i.e., JS backend is NOT 'none'),
+    // the JS AI object's feedText method is made a no-op to prevent double-cleaning.
+    // The realAi object is kept available for recovery functionality.
+    let controllerAi;
+    const jsAiBackend = settings.get_string('ai-backend');
+
+    if (jsAiBackend !== 'none') {
+        // Rust core is active. Use a no-op AI for live dictation path.
+        controllerAi = {
+            ...realAi, // Inherit methods like finalize, which are needed for recovery
+            feedText: async () => { /* No-op for live dictation */ },
+            isAvailable: () => false, // Indicate it's not available for live use
+        };
+        print('[gtk-app] Live AI dictation path bypassed; Rust core is handling cleanup.');
+    } else {
+        // JS AI backend is 'none'. Pass the realAi object directly to the controller.
+        controllerAi = realAi;
+        print('[gtk-app] JS AI backend set to None.');
+    }
+    let ai = controllerAi; // Use controllerAi for DictationController constructor and setAi
 
     // ── Build the window ──
     const window = new Gtk.ApplicationWindow({
@@ -192,10 +234,11 @@ app.connect('activate', () => {
     statusBox.append(sttLabel);
 
     const sttCombo = new Gtk.DropDown({
-        model: Gtk.StringList.new(['Vosk', 'Whisper', 'dlgo (Go)']),
+        model: Gtk.StringList.new(['Whisper']), // Only Whisper is supported now
     });
-    const currentStt = settings.get_string('stt-backend');
-    sttCombo.selected = currentStt === 'dlgo' ? 2 : (currentStt === 'whisper' ? 1 : 0);
+    // Since there's only one option, its index is always 0.
+    // The initial value from settings is handled by the subsequent logic.
+    // sttCombo.selected = 0; 
     statusBox.append(sttCombo);
 
     const sttPathEntry = new Gtk.Entry({
@@ -203,15 +246,14 @@ app.connect('activate', () => {
         hexpand: true,
     });
     const updateSttPathValue = () => {
-        const backend = settings.get_string('stt-backend');
-        const key = backend === 'vosk' ? 'vosk-model-path' : 'whisper-model-path';
-        sttPathEntry.text = settings.get_string(key);
+        // Only whisper-model-path is relevant now
+        sttPathEntry.text = settings.get_string('whisper-model-path');
     };
     updateSttPathValue();
     root.append(sttPathEntry);
 
     sttCombo.connect('notify::selected', () => {
-        const opts = ['vosk', 'whisper', 'dlgo'];
+        const opts = ['whisper']; // Only Whisper is supported
         const sel = opts[sttCombo.selected];
         settings.set_string('stt-backend', sel);
         updateSttPathValue();
@@ -220,9 +262,7 @@ app.connect('activate', () => {
     });
 
     sttPathEntry.connect('activate', () => {
-        const backend = settings.get_string('stt-backend');
-        const key = backend === 'vosk' ? 'vosk-model-path' : 'whisper-model-path';
-        settings.set_string(key, sttPathEntry.text);
+        settings.set_string('whisper-model-path', sttPathEntry.text);
         print(`[gtk-app] STT model path updated to ${sttPathEntry.text}`);
     });
 
@@ -348,7 +388,8 @@ app.connect('activate', () => {
     function appendFinal(text) {
         const buffer = finalsView.tv.buffer;
         const end = buffer.get_end_iter();
-        buffer.insert(end, `${text}\n`, -1);
+        buffer.insert(end, `${text}
+`, -1);
         const mark = buffer.get_insert();
         finalsView.tv.scroll_mark_onscreen(mark);
     }
@@ -382,8 +423,9 @@ app.connect('activate', () => {
             appendFinal(text);
         },
         onLevel: (rms, _peak) => {
-            // rms is in dB (negative). Map -60..0 dB → 0..1.
-            const norm = Math.max(0, Math.min(1, (rms + 60) / 60));
+            // The Rust core sends linear RMS scaled by 5x (0..~5).
+            // Clamp to 0..1 for the level bar.
+            const norm = Math.max(0, Math.min(1, rms));
             levelBar.value = norm;
         },
         onTranscript: (entry) => {
@@ -395,7 +437,8 @@ app.connect('activate', () => {
             // to the result view so it's visible.
             const buffer = resultView.tv.buffer;
             const end = buffer.get_end_iter();
-            buffer.insert(end, `[error] ${msg}\n`, -1);
+            buffer.insert(end, `[error] ${msg}
+`, -1);
         },
         onLog: (msg) => print(`[gtk-app] ${msg}`),
     });
@@ -409,7 +452,8 @@ app.connect('activate', () => {
         print(`[gtk-app] STARTUP ERROR: ${msg}`);
         const buffer = resultView.tv.buffer;
         const end = buffer.get_end_iter();
-        buffer.insert(end, `[startup error] ${msg}\n`, -1);
+        buffer.insert(end, `[startup error] ${msg}
+`, -1);
         startBtn.sensitive = false;
         testBtn.sensitive = false;
         statusBox.set_tooltip_text(msg);
@@ -477,7 +521,8 @@ app.connect('activate', () => {
             const buffer = resultView.tv.buffer;
             const end = buffer.get_end_iter();
             buffer.insert(end,
-                '[test recording] recorder not ready yet — wait for the STT model to load\n',
+                `[test recording] recorder not ready yet — wait for the STT model to load
+`,
                 -1);
             return;
         }
@@ -485,7 +530,8 @@ app.connect('activate', () => {
             const buffer = resultView.tv.buffer;
             const end = buffer.get_end_iter();
             buffer.insert(end,
-                `[test recording] controller busy (state: ${controller.getState()})\n`,
+                `[test recording] controller busy (state: ${controller.getState()})
+`,
                 -1);
             return;
         }
@@ -527,14 +573,16 @@ app.connect('activate', () => {
                 const buffer = resultView.tv.buffer;
                 const end = buffer.get_end_iter();
                 buffer.insert(end,
-                    `[test recording] failed to start: ${result.reason ?? 'unknown'}\n`,
+                    `[test recording] failed to start: ${result.reason ?? 'unknown'}
+`,
                     -1);
                 unlock();
             }
         }).catch((e) => {
             const buffer = resultView.tv.buffer;
             const end = buffer.get_end_iter();
-            buffer.insert(end, `[test recording] error: ${e.message}\n`, -1);
+            buffer.insert(end, `[test recording] error: ${e.message}
+`, -1);
             unlock();
         });
     });
@@ -606,7 +654,8 @@ app.connect('activate', () => {
             if (!ok) {
                 const buffer = resultView.tv.buffer;
                 const end = buffer.get_end_iter();
-                buffer.insert(end, `[recovery error] ${error}\n`, -1);
+                buffer.insert(end, `[recovery error] ${error}
+`, -1);
                 recoverBtn.sensitive = true;
                 return;
             }
@@ -621,7 +670,9 @@ app.connect('activate', () => {
             buffer.insert(end, text, -1);
         };
 
-        insertHeader(`\n=== RECOVERY: ${GLib.path_get_basename(audioPath)} ===\n`);
+        insertHeader(`
+=== RECOVERY: ${GLib.path_get_basename(audioPath)} ===
+`);
         stateLabel.set_markup('<b>State:</b> recovering...');
 
         let totalFinals = 0;
@@ -657,13 +708,17 @@ app.connect('activate', () => {
                 stateLabel.set_markup(
                     `<b>State:</b> recovery done — ${finals_count} segments, ${raw_text.length} chars`);
                 partialLabel.set_label('');
-                insertHeader(`\n--- recovered text (${finals_count} segments) ---\n${raw_text}\n`);
+                insertHeader(`
+--- recovered text (${finals_count} segments) ---
+${raw_text}
+`);
 
                 // Save as a transcript JSON via the controller's helper
                 const entry = controller.saveTranscript(
                     raw_text, raw_text, audioPath, false);
                 if (entry) {
-                    insertHeader(`(saved to ${entry.filePath})\n`);
+                    insertHeader(`(saved to ${entry.filePath})
+`);
                     entry.recovered = true;
                     entry.audioPath = audioPath;
 
@@ -674,14 +729,19 @@ app.connect('activate', () => {
                     if (ai && ai.isAvailable && ai.isAvailable()) {
                         runRecoveryCleanupWithFeedback(entry, ai, {
                             onStart: () => {
-                                insertHeader('[AI cleaning recovered transcript...]\n');
+                                insertHeader(`[AI cleaning recovered transcript...]
+`);
                             },
                             onDone: (e) => {
-                                insertHeader(`[AI cleanup complete]\n--- cleaned text ---\n${e.cleanedText}\n`);
+                                insertHeader(`[AI cleanup complete]
+--- cleaned text ---
+${e.cleanedText}
+`);
                             },
                             onError: (err) => {
                                 const msg = err ? err.message : 'empty result';
-                                insertHeader(`[AI cleanup failed: ${msg} — raw text kept]\n`);
+                                insertHeader(`[AI cleanup failed: ${msg} — raw text kept]
+`);
                             },
                         });
                     }
@@ -692,14 +752,16 @@ app.connect('activate', () => {
             },
             onError: (msg) => {
                 stateLabel.set_markup(`<b>State:</b> recovery error`);
-                insertHeader(`[recovery error] ${msg}\n`);
+                insertHeader(`[recovery error] ${msg}
+`);
                 activeRecoveryTranscriber = null;
                 recoverBtn.sensitive = true;
             },
         });
         activeRecoveryTranscriber = transcriber;
         if (!transcriber.start(audioPath, null)) {
-            insertHeader('[recovery error] failed to start FileTranscriber\n');
+            insertHeader(`[recovery error] failed to start FileTranscriber
+`);
             activeRecoveryTranscriber = null;
             recoverBtn.sensitive = true;
         }

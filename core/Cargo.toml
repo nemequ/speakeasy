@@ -1,5 +1,5 @@
 [package]
-name = "speakeasy-core"
+name = "speakeasy"
 version = "0.1.0"
 edition = "2021"
 
@@ -17,6 +17,13 @@ crossterm = { version = "0.27", features = ["event-stream"] }
 hound = "3.5"
 libc = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
+# Local AI cleanup: candle is pure Rust (no libclang/bindgen), reads
+# the same GGUF files as llama.cpp via quantized_qwen2::ModelWeights.
+# tokenizers is set with default-features=false to avoid the `onig` C
+# regex backend — we use the fancy-regex pure-Rust fallback instead.
+candle-core = "0.8"
+candle-transformers = "0.8"
+tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
 
 [profile.release]
 opt-level = 3
