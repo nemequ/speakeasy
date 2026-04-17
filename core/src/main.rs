@@ -70,7 +70,7 @@ pub enum Event {
     Ready,
     Partial { text: String },
     Final { text: String },
-    Level { rms: f64 },
+    Level { rms: f64, peak: f64 },
     Stopped { text: String },
     Error { message: String },
 }
@@ -378,15 +378,19 @@ async fn main() -> Result<()> {
 
                 // 3. Downsample 48kHz -> 16kHz (Average 3 samples)
                 let mut sum_sq = 0.0;
+                let mut peak_lin = 0.0f32;
                 for i in (0..FRAME_SIZE).step_by(3) {
                     let avg = (out_frame[i] + out_frame[i+1] + out_frame[i+2]) / 3.0;
                     final_buf.push(avg);
                     sum_sq += (avg * avg) as f64;
+                    let a = avg.abs();
+                    if a > peak_lin { peak_lin = a; }
                 }
 
                 // 4. Send Level (Boosted for TUI visibility)
                 let rms = (sum_sq / (FRAME_SIZE as f64 / 3.0)).sqrt() * 5.0;
-                let _ = event_tx_audio.send(Event::Level { rms });
+                let peak = (peak_lin as f64) * 5.0;
+                let _ = event_tx_audio.send(Event::Level { rms, peak });
 
                 // Consume processed samples
                 mono_48k.drain(..FRAME_SIZE);

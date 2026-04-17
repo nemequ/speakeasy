@@ -49,7 +49,7 @@ pub async fn run_tui(
             let mut s = state.lock().unwrap();
             match event {
                 Event::Ready => s.status = "Ready".to_string(),
-                Event::Level { rms } => {
+                Event::Level { rms, peak: _ } => {
                     s.level = rms;
                 }
                 Event::Partial { text } => {
