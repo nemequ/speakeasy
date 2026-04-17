@@ -331,13 +331,19 @@ class RecordingOverlay extends St.BoxLayout {
     }
 
     /**
-     * Feed an audio level reading for the waveform.
-     * @param {number} rmsDb  - RMS level in dB
-     * @param {number} peakDb - Peak level in dB
+     * Feed an audio level reading for the waveform. Inputs are
+     * linear amplitudes in roughly [0, 1] (the core emits raw
+     * linear peak alongside a TUI-boosted rms). We convert peak to
+     * dB here so the -60..0 dB mapping produces a natural-looking
+     * VU meter for speech.
+     *
+     * @param {number} _rms - RMS amplitude (unused; peak drives display)
+     * @param {number} peak - Peak amplitude, linear
      */
-    setLevel(rmsDb, peakDb) {
+    setLevel(_rms, peak) {
         const minDb = -60;
         const maxDb = 0;
+        const peakDb = peak > 0 ? 20 * Math.log10(peak) : minDb;
         const normalized = Math.max(0, Math.min(1,
             (peakDb - minDb) / (maxDb - minDb)));
         this._waveform.pushLevel(normalized);

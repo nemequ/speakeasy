@@ -387,9 +387,13 @@ async fn main() -> Result<()> {
                     if a > peak_lin { peak_lin = a; }
                 }
 
-                // 4. Send Level (Boosted for TUI visibility)
+                // 4. Send Level. rms is boosted 5x because the TUI's
+                //    level bar is calibrated for that scale (see
+                //    tui.rs: `level * 200.0`). peak is raw linear so
+                //    the Shell overlay's 20*log10() conversion lands
+                //    in a natural [-60, 0] dB range for speech.
                 let rms = (sum_sq / (FRAME_SIZE as f64 / 3.0)).sqrt() * 5.0;
-                let peak = (peak_lin as f64) * 5.0;
+                let peak = peak_lin as f64;
                 let _ = event_tx_audio.send(Event::Level { rms, peak });
 
                 // Consume processed samples
