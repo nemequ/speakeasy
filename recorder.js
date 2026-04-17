@@ -13,6 +13,15 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 
+// How long to wait for the subprocess to emit `stopped` after it
+// has acknowledged the stop command with a `transcribing` event.
+// Distinct from `_stopTimeoutSecs`, which is the pre-ack window
+// that guards against the 2026-04-08 busy-loop hang. Once we've
+// heard `transcribing` we know the subprocess is alive and
+// running whisper, so the only risk is a slow decode on a long
+// buffer — 60s is generous for Steam Deck CPU / whisper-tiny.
+const TRANSCRIBE_WATCHDOG_SECS = 60;
+
 // GStreamer is never imported in this file. It lives entirely in the
 // STT subprocess — loading it here would run Gst.init() (a plugin
 // registry scan) synchronously on the GNOME Shell main thread, which
@@ -744,12 +753,24 @@ export class Recorder {
      * (e.g. from a re-entered stop), it is replaced.
      */
     _armStopWatchdog() {
+        this._armStopWatchdogWithTimeout(this._stopTimeoutSecs);
+    }
+
+    /**
+     * Arm the stop watchdog with an explicit timeout. Used by both
+     * the initial stop-accepted window (`_stopTimeoutSecs`) and the
+     * extended decode-in-progress window fired by a `transcribing`
+     * event from the subprocess.
+     *
+     * @param {number} secs - timeout in seconds; <=0 disables
+     */
+    _armStopWatchdogWithTimeout(secs) {
         this._cancelStopWatchdog();
-        if (this._stopTimeoutSecs <= 0)
+        if (secs <= 0)
             return;  // disabled by user
         this._stopWatchdogId = GLib.timeout_add_seconds(
             GLib.PRIORITY_DEFAULT,
-            this._stopTimeoutSecs,
+            secs,
             () => {
                 this._stopWatchdogId = 0;
                 this._onStopWatchdogFired();
@@ -996,6 +1017,18 @@ export class Recorder {
             case 'level':
                 if (this._onLevel)
                     this._onLevel(msg.rms, msg.peak);
+                break;
+
+            case 'transcribing':
+                // Keep-alive: the subprocess accepted our stop and is
+                // now running the final whisper decode. Re-arm the
+                // watchdog with the longer "decode in progress"
+                // timeout so a slow-but-progressing decode on a long
+                // recording isn't killed as if it were genuinely hung.
+                if (this._stopResolve) {
+                    log(`Speakeasy: subprocess transcribing; extending stop watchdog to ${TRANSCRIBE_WATCHDOG_SECS}s`);
+                    this._armStopWatchdogWithTimeout(TRANSCRIBE_WATCHDOG_SECS);
+                }
                 break;
 
             case 'stopped': {

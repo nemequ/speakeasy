@@ -229,6 +229,52 @@ const loop = GLib.MainLoop.new(null, false);
         assertEqual(r._stopWatchdogId, 0, 'no watchdog');
     });
 
+    await test('"transcribing" event extends the watchdog past the pre-ack window', async () => {
+        // Regression guard for the long-recording wedge: the core
+        // emits `transcribing` right after accepting a stop. The
+        // watchdog must switch from the short pre-ack timeout to the
+        // longer decode-in-progress timeout so whisper can finish on
+        // a long buffer without being SIGKILLed.
+        const r = makeRunningRecorder({
+            timeoutSecs: 1,
+            finals: ['partial', 'text'],
+        });
+
+        const stopPromise = r.stop();
+        assert(r._stopWatchdogId !== 0, 'watchdog armed');
+        const initialId = r._stopWatchdogId;
+
+        // Simulate the core's `transcribing` keep-alive arriving
+        // quickly, before the 1s pre-ack window would fire.
+        r._handleMessage('{"event":"transcribing"}');
+        assert(r._stopWatchdogId !== 0, 'watchdog still armed after transcribing');
+        assert(r._stopWatchdogId !== initialId, 'watchdog was re-armed with new id');
+
+        // Wait past the original 1s pre-ack window. The watchdog
+        // must NOT fire — the subprocess signalled it's still
+        // working via `transcribing`.
+        await new Promise(res => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => { res(); return GLib.SOURCE_REMOVE; }));
+        assertEqual(r._subprocess.forceExitCalled, false, 'subprocess NOT killed during decode');
+        assert(r._stopWatchdogId !== 0, 'watchdog still armed 1.5s in');
+
+        // Eventually the subprocess sends stopped; promise resolves
+        // with the real text and the watchdog cancels cleanly.
+        r._handleMessage('{"event":"stopped","text":"final decoded text"}');
+        const result = await stopPromise;
+        assertEqual(result, 'final decoded text', 'real decoded text returned');
+        assertEqual(r._stopWatchdogId, 0, 'watchdog cancelled');
+    });
+
+    await test('"transcribing" without a pending stop is a safe no-op', async () => {
+        // The recorder might get a spurious `transcribing` if a race
+        // between stop and some other flow arises. It should not
+        // arm a watchdog out of nowhere.
+        const r = makeRunningRecorder({timeoutSecs: 5, finals: []});
+        assertEqual(r._stopWatchdogId, 0, 'no watchdog initially');
+        r._handleMessage('{"event":"transcribing"}');
+        assertEqual(r._stopWatchdogId, 0, 'no watchdog armed by spurious transcribing');
+    });
+
     await test('synthesized text is empty when no finals were committed', async () => {
         const r = makeRunningRecorder({timeoutSecs: 1, finals: []});
         const stopPromise = r.stop();

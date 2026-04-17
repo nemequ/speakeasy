@@ -56,6 +56,10 @@ pub async fn run_tui(
                     s.transcription = text;
                     s.status = "Recording... (partial)".to_string();
                 }
+                Event::Transcribing => {
+                    s.status = "Transcribing...".to_string();
+                    s.level = 0.0;
+                }
                 Event::Stopped { text } => {
                     s.transcription = text;
                     s.status = "Idle".to_string();
@@ -69,7 +73,6 @@ pub async fn run_tui(
                 Event::Error { message } => {
                     s.status = format!("Error: {}", message);
                 }
-                _ => {}
             }
         }
     });

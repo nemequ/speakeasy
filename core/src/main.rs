@@ -71,6 +71,12 @@ pub enum Event {
     Partial { text: String },
     Final { text: String },
     Level { rms: f64, peak: f64 },
+    // Emitted immediately after a `stop` command is accepted, before
+    // the final whisper decode runs. The JS-side stop watchdog treats
+    // this as a keep-alive and switches from its "subprocess hasn't
+    // even acknowledged stop" timeout to a longer "decode in progress"
+    // timeout, so long recordings aren't SIGKILLed mid-decode.
+    Transcribing,
     Stopped { text: String },
     Error { message: String },
 }
@@ -459,6 +465,12 @@ async fn main() -> Result<()> {
                     "stop" | "stop_file" => {
                         recording.store(false, Ordering::SeqCst);
                         is_recording = false;
+
+                        // Keep-alive to the parent: we accepted the stop
+                        // and are about to run the final decode. Lets the
+                        // parent's stop watchdog extend itself instead of
+                        // firing on a legitimately-slow long-audio decode.
+                        let _ = event_tx.send(Event::Transcribing);
 
                         let buf = audio_buffer.lock().unwrap().clone();
 
