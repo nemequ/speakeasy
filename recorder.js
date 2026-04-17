@@ -265,6 +265,16 @@ export class Recorder {
         this._onAiCleanedText = callback;
     }
 
+    /**
+     * Streaming AI cleanup: called with each token chunk as the core
+     * generates it (Event::Delta). Concatenating every chunk between
+     * a stop and the terminal 'final' reconstructs the cleaned text.
+     * @param {function(string)} callback
+     */
+    onAiCleanedDelta(callback) {
+        this._onAiCleanedDelta = callback;
+    }
+
     // ─── Model detection ────────────────────────────────────────────
 
     static detectWhisperModelPath() {
@@ -1017,6 +1027,14 @@ export class Recorder {
             case 'level':
                 if (this._onLevel)
                     this._onLevel(msg.rms, msg.peak);
+                break;
+
+            case 'delta':
+                // Streaming AI cleanup chunk. Only meaningful after
+                // stop — if somehow a delta arrives while recording
+                // is active, ignore it rather than confuse the UI.
+                if (msg.text && !this._running && this._onAiCleanedDelta)
+                    this._onAiCleanedDelta(msg.text);
                 break;
 
             case 'transcribing':

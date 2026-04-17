@@ -137,6 +137,11 @@ class RecordingOverlay extends St.BoxLayout {
         // Partial text label reference (always last child in transcript box)
         this._partialLabel = null;
 
+        // Streaming cleanup label — appended-to as Event::Delta chunks
+        // arrive from the core, replaced wholesale by the terminal
+        // Event::Final. Null until beginCleanup() is called.
+        this._cleanedLabel = null;
+
         // Callbacks
         this._onCancel = null;
 
@@ -160,6 +165,27 @@ class RecordingOverlay extends St.BoxLayout {
         this._waveform = new WaveformDisplay();
         this._headerBox.add_child(this._waveform);
 
+        // Paste button — hidden until the extension calls
+        // showPasteButton(). Marked non-focusable so clicking it
+        // doesn't steal keyboard focus from whatever the user was
+        // typing into — paste would otherwise land in the overlay
+        // itself.
+        this._pasteButton = new St.Button({
+            style_class: 'speakeasy-overlay-paste-button',
+            child: new St.Icon({
+                icon_name: 'edit-paste-symbolic',
+                icon_size: 16,
+            }),
+            y_align: Clutter.ActorAlign.CENTER,
+            visible: false,
+            can_focus: false,
+        });
+        this._pasteButton.connect('clicked', () => {
+            if (this._onPaste)
+                this._onPaste();
+        });
+        this._headerBox.add_child(this._pasteButton);
+
         this._cancelButton = new St.Button({
             style_class: 'speakeasy-overlay-cancel-button',
             child: new St.Icon({
@@ -167,6 +193,7 @@ class RecordingOverlay extends St.BoxLayout {
                 icon_size: 16,
             }),
             y_align: Clutter.ActorAlign.CENTER,
+            can_focus: false,
         });
         this._cancelButton.connect('clicked', () => {
             if (this._onCancel)
@@ -203,10 +230,9 @@ class RecordingOverlay extends St.BoxLayout {
             style_class: 'speakeasy-overlay-partial-text',
             x_expand: true,
             visible: false,
+            reactive: true,
         });
-        this._partialLabel.clutter_text.set_line_wrap(true);
-        this._partialLabel.clutter_text.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
-        this._partialLabel.clutter_text.set_ellipsize(Pango.EllipsizeMode.NONE);
+        this._configureSelectableLabel(this._partialLabel);
         this._transcriptBox.add_child(this._partialLabel);
 
         // Auto-scroll: only follow new content if already at the bottom.
@@ -256,6 +282,57 @@ class RecordingOverlay extends St.BoxLayout {
         this._onCancel = callback;
     }
 
+    /**
+     * Set a callback for when the paste button is clicked. The
+     * callback receives no arguments — the extension is expected
+     * to pull the current text via getCurrentText() and push it to
+     * the output layer (clipboard + Shift+Insert).
+     * @param {function} callback
+     */
+    onPaste(callback) {
+        this._onPaste = callback;
+    }
+
+    /**
+     * Show the Paste button. One-shot semantics are the caller's
+     * responsibility: the overlay just shows/hides it. After a
+     * successful paste the caller typically hides it and closes
+     * the overlay so a second click can't double-paste.
+     */
+    showPasteButton() {
+        this._pasteButton?.show();
+    }
+
+    hidePasteButton() {
+        this._pasteButton?.hide();
+    }
+
+    /**
+     * Concatenate the displayed text in reading order: raw STT
+     * finals first (if any), then cleaned-streaming text (if any),
+     * then the tail partial (usually empty by the time we're
+     * showing a Paste button). Returns an empty string if there's
+     * nothing displayed.
+     */
+    getCurrentText() {
+        if (this._cleanedLabel && this._cleanedLabel.text)
+            return this._cleanedLabel.text;
+        const parts = [];
+        for (const child of this._transcriptBox.get_children()) {
+            if (child === this._partialLabel || child === this._cleanedLabel)
+                continue;
+            const t = child.text;
+            if (t) parts.push(t);
+        }
+        if (this._partialLabel && this._partialLabel.text)
+            parts.push(this._partialLabel.text);
+        return parts.join(' ').trim();
+    }
+
+    hasText() {
+        return this.getCurrentText().length > 0;
+    }
+
     // ── Public API ──
     // Note: we use open/close instead of show/hide to avoid
     // shadowing Clutter.Actor.show() / hide().
@@ -279,6 +356,7 @@ class RecordingOverlay extends St.BoxLayout {
     close() {
         this._mode = 'idle';
         this._spinner.stop();
+        this.hidePasteButton();
         super.hide();
     }
 
@@ -318,16 +396,87 @@ class RecordingOverlay extends St.BoxLayout {
             text,
             style_class: 'speakeasy-overlay-final-text',
             x_expand: true,
+            reactive: true,
         });
-        label.clutter_text.set_line_wrap(true);
-        label.clutter_text.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
-        label.clutter_text.set_ellipsize(Pango.EllipsizeMode.NONE);
+        this._configureSelectableLabel(label);
 
         // Insert before the partial label (which is always last)
         this._transcriptBox.insert_child_below(label, this._partialLabel);
 
         // Clear partial text since the final supersedes it
         this.setPartialText('');
+    }
+
+    /**
+     * Start an AI-cleanup streaming pass. Replaces the raw STT
+     * segments with a single fresh label that subsequent deltas
+     * append into. Safe to call multiple times — each call wipes
+     * prior cleaned text so a retry doesn't accumulate.
+     */
+    beginCleanup() {
+        const children = this._transcriptBox.get_children();
+        for (const child of children) {
+            if (child !== this._partialLabel)
+                child.destroy();
+        }
+        this.setPartialText('');
+
+        this._cleanedLabel = new St.Label({
+            text: '',
+            style_class: 'speakeasy-overlay-final-text speakeasy-overlay-cleaned-text',
+            x_expand: true,
+            reactive: true,
+        });
+        this._configureSelectableLabel(this._cleanedLabel);
+        this._transcriptBox.insert_child_below(
+            this._cleanedLabel, this._partialLabel);
+    }
+
+    /**
+     * Append a streamed cleanup chunk. Lazily initializes the
+     * cleaned label if the core somehow emits a delta before we
+     * called beginCleanup() — protects against race conditions in
+     * the caller.
+     * @param {string} text
+     */
+    appendCleanedDelta(text) {
+        if (!text) return;
+        if (!this._cleanedLabel)
+            this.beginCleanup();
+        this._cleanedLabel.text = (this._cleanedLabel.text || '') + text;
+    }
+
+    /**
+     * Replace the cleanup buffer with the terminal full text from
+     * Event::Final. Deltas + final should agree, but if anything
+     * slipped (truncation, retry) the final wins.
+     * @param {string} text
+     */
+    setCleanedText(text) {
+        if (!this._cleanedLabel)
+            this.beginCleanup();
+        this._cleanedLabel.text = text || '';
+    }
+
+    /**
+     * Configure a label's ClutterText so the user can click-drag to
+     * select text, and Ctrl+C to copy it to the clipboard. Without
+     * `selectable` + `reactive` on the ClutterText, St.Label is a
+     * purely-display widget and any click on it bubbles up to the
+     * overlay (where the old code used it to start a drag).
+     *
+     * Keep `cursor_visible` off so the text area doesn't blink as if
+     * it were editable.
+     */
+    _configureSelectableLabel(label) {
+        const ct = label.clutter_text;
+        ct.set_line_wrap(true);
+        ct.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
+        ct.set_ellipsize(Pango.EllipsizeMode.NONE);
+        ct.set_selectable(true);
+        ct.set_editable(false);
+        ct.set_cursor_visible(false);
+        ct.reactive = true;
     }
 
     /**
@@ -367,10 +516,14 @@ class RecordingOverlay extends St.BoxLayout {
                 this._scrollView.show();
                 this._statusBox.hide();
                 this._spinner.stop();
+                this.hidePasteButton();
                 break;
 
             case 'processing':
-                this._headerBox.hide();
+                // Keep the header visible during processing so the
+                // paste button (added by the extension on cleaned-text
+                // delivery) is reachable without a second popup.
+                this._headerBox.show();
                 this._scrollView.show();
                 this._statusBox.show();
                 this._spinner.play();
@@ -390,37 +543,36 @@ class RecordingOverlay extends St.BoxLayout {
         }
         this._partialLabel.text = '';
         this._partialLabel.hide();
+        this._cleanedLabel = null;
         this._waveform.reset();
         this._autoScroll = true;
     }
 
     // ── Drag handling ──
+    //
+    // Drag is scoped to the header strip only (mic icon + waveform +
+    // control buttons). Clicks in the transcript area propagate so
+    // the ClutterText can start a text selection; clicks on a Button
+    // or ScrollBar are consumed by that widget before our vfunc runs.
 
-    _isClickableChild(x, y) {
-        // Pick the actor at the given stage coordinates and walk up —
-        // if we hit a Button or ScrollBar before this overlay, the
-        // click should go to that widget, not start a drag.
-        let actor = global.stage.get_actor_at_pos(
-            Clutter.PickMode.REACTIVE, x, y);
-        while (actor && actor !== this) {
-            if (actor instanceof St.Button || actor instanceof St.ScrollBar)
-                return true;
-            actor = actor.get_parent();
-        }
-        return false;
+    _isHeaderPress(x, y) {
+        if (!this._headerBox || !this._headerBox.visible)
+            return false;
+        const [hx, hy] = this._headerBox.get_transformed_position();
+        const [hw, hh] = this._headerBox.get_transformed_size();
+        return x >= hx && x < hx + hw && y >= hy && y < hy + hh;
     }
 
     vfunc_button_press_event(event) {
         if (event.get_button() !== Clutter.BUTTON_PRIMARY)
             return Clutter.EVENT_PROPAGATE;
 
-        // Let buttons and scrollbars handle their own clicks
-        if (this._isClickableChild(event.get_coords()[0], event.get_coords()[1]))
+        const [x, y] = event.get_coords();
+        if (!this._isHeaderPress(x, y))
             return Clutter.EVENT_PROPAGATE;
 
-        // Everything else starts a drag
         this._isDragging = true;
-        [this._dragStartX, this._dragStartY] = event.get_coords();
+        [this._dragStartX, this._dragStartY] = [x, y];
         [this._origX, this._origY] = this.get_position();
         this._grab = global.stage.grab(this);
 

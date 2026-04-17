@@ -83,11 +83,40 @@ export default class SpeakeasyExtension extends Extension {
                 });
         }
 
-        // Wire overlay cancel button — discard the current recording
+        // Wire overlay cancel button. Meaning depends on controller state:
+        //  - RECORDING: discard the in-flight recording (delete audio,
+        //    skip transcript). Same as pre-decoupled-paste behavior.
+        //  - PROCESSING / post-stop: just close the overlay without
+        //    pasting. The transcript has already been saved by the
+        //    controller; we're only dismissing the UI.
         this._overlay.onCancel(() => {
-            log('Speakeasy: recording cancelled via overlay button');
-            this._keybinding.forceState(State.IDLE);
-            this._discardRecording();
+            const state = this._controller?.getState?.();
+            if (state === ControllerState.RECORDING) {
+                log('Speakeasy: recording cancelled via overlay button');
+                this._keybinding.forceState(State.IDLE);
+                this._discardRecording();
+            } else {
+                log('Speakeasy: overlay dismissed without paste');
+                this._overlay.close();
+            }
+        });
+
+        // Wire overlay paste button — one-shot paste of the currently
+        // displayed text. Hides the button and closes the overlay
+        // immediately on click so a second click can't double-paste.
+        this._overlay.onPaste(() => {
+            if (!this._overlay) return;
+            const text = this._overlay.getCurrentText();
+            this._overlay.hidePasteButton();
+            this._overlay.close();
+            if (text && this._output) {
+                log(`Speakeasy: pasting ${text.length} chars via overlay button`);
+                try {
+                    this._output.typeText(text);
+                } catch (e) {
+                    log(`Speakeasy: paste error: ${e.message}`);
+                }
+            }
         });
 
         // The DictationController owns the recorder/AI/output
@@ -114,6 +143,20 @@ export default class SpeakeasyExtension extends Extension {
 
         this._recorder.onError(msg => {
             this._notify(`Speakeasy: STT subprocess error: ${msg}`);
+        });
+
+        // Streaming AI cleanup: the core emits a stream of Event::Delta
+        // chunks during generation, followed by a terminal Event::Final
+        // with the full cleaned text. The overlay shows them live so
+        // the user sees cleanup progress instead of staring at a
+        // spinner. The controller doesn't participate — it's wired
+        // straight to the recorder because the controller's AI
+        // (aiNoop) is a passthrough for in-core cleanup.
+        this._recorder.onAiCleanedDelta(text => {
+            this._overlay?.appendCleanedDelta(text);
+        });
+        this._recorder.onAiCleanedText(text => {
+            this._overlay?.setCleanedText(text);
         });
 
         // Spawn the STT subprocess.  This returns immediately — the
@@ -185,15 +228,33 @@ export default class SpeakeasyExtension extends Extension {
             ai: this._ai,
             output: this._output,
             settings: this._settings,
+            // Paste is driven by the overlay's Paste button, not by
+            // the controller. The controller still writes the
+            // transcript and closes the session log — only the
+            // paste hop is deferred. This lets the user dictate,
+            // switch windows, then paste on their schedule.
+            autoPaste: false,
             onStateChanged: (state) => {
                 if (state === ControllerState.RECORDING)
                     this._overlay?.open('recording');
-                else if (state === ControllerState.PROCESSING)
+                else if (state === ControllerState.PROCESSING) {
                     this._overlay?.setMode('processing');
+                    // AI cleanup text streams into the overlay from
+                    // this point. Expose a Paste button now so the
+                    // user can paste early (raw STT) or wait for
+                    // cleanup to complete — their choice.
+                    this._overlay?.showPasteButton();
+                }
                 else if (state === ControllerState.IDLE) {
                     this._keybinding?.processingDone();
-                    this._overlay?.close();
                     this._uninhibitIdle();
+                    // Close only if there's nothing to paste —
+                    // otherwise leave the overlay open and wait for
+                    // the user to click Paste or Cancel. AI cleanup
+                    // may still be streaming into the overlay via
+                    // the Event::Delta path wired below.
+                    if (!this._overlay?.hasText?.())
+                        this._overlay?.close();
                 }
             },
             onPartialText: (text) => {

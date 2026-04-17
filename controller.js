@@ -66,6 +66,13 @@ export class DictationController {
      *   sessions dir for the crash-safe session log. Defaults to
      *   ~/.local/share/speakeasy/sessions. Tests should pass this so
      *   they don't pollute the user's real data dir.
+     * @param {boolean} [opts.autoPaste=true] - When true (default),
+     *   the controller pastes the cleaned text via `output.typeText`
+     *   at the end of _stopInner, matching historic behavior. When
+     *   false, the paste step is skipped and the caller is expected
+     *   to drive the paste on explicit user action (e.g. a Paste
+     *   button in the Shell overlay). Transcripts and session logs
+     *   are written either way — only the final paste hop changes.
      *
      * Callbacks (all optional):
      * @param {function(string)} [opts.onStateChanged]   - controller state
@@ -84,6 +91,7 @@ export class DictationController {
         this._settings = opts.settings;
         this._transcriptDirOverride = opts.transcriptDirOverride ?? null;
         this._sessionsDirOverride = opts.sessionsDirOverride ?? null;
+        this._autoPaste = opts.autoPaste ?? true;
 
         this._onStateChanged = opts.onStateChanged ?? null;
         this._onPartialText = opts.onPartialText ?? null;
@@ -350,25 +358,34 @@ export class DictationController {
         // Output the text (clipboard paste in Shell, GtkTextView
         // append in test app, etc.). transcriptOk stays true even
         // on output failure — we still save the transcript.
+        //
+        // When autoPaste is false the caller drives paste on its
+        // own (Shell overlay button, etc.). We still mark
+        // transcriptOk so the transcript save runs.
         let transcriptOk = false;
         if (textToOutput !== null) {
-            this._log(`Speakeasy controller: outputting text: "${textToOutput}"`);
-            if (output) {
-                try {
-                    const success = await output.typeText(textToOutput);
-                    transcriptOk = true;
-                    if (!success) {
-                        this._log('Speakeasy controller: output failed (paste)');
-                        this._fireError(
-                            'Please activate a text input before completing recording. ' +
-                            'Transcript has been saved.');
-                    }
-                } catch (e) {
-                    this._log(`Speakeasy controller: output error: ${e.message}`);
-                    transcriptOk = true;  // we still have the text
-                }
-            } else {
+            if (!this._autoPaste) {
+                this._log('Speakeasy controller: autoPaste disabled, skipping output.typeText');
                 transcriptOk = true;
+            } else {
+                this._log(`Speakeasy controller: outputting text: "${textToOutput}"`);
+                if (output) {
+                    try {
+                        const success = await output.typeText(textToOutput);
+                        transcriptOk = true;
+                        if (!success) {
+                            this._log('Speakeasy controller: output failed (paste)');
+                            this._fireError(
+                                'Please activate a text input before completing recording. ' +
+                                'Transcript has been saved.');
+                        }
+                    } catch (e) {
+                        this._log(`Speakeasy controller: output error: ${e.message}`);
+                        transcriptOk = true;  // we still have the text
+                    }
+                } else {
+                    transcriptOk = true;
+                }
             }
         }
 
