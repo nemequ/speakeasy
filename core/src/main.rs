@@ -1,6 +1,7 @@
 mod tui;
 mod ai;
 mod ai_local;
+mod ai_worker;
 
 use anyhow::{Context, Result};
 use hound::{WavReader, WavSpec, WavWriter, SampleFormat};
@@ -310,6 +311,22 @@ async fn main() -> Result<()> {
     // Channels for UI/stdin -> Core communication
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
+    // Spawn the AI worker if we have a local (llama) backend. The
+    // worker pre-loads the GGUF while the user is speaking so the
+    // post-stop cleanup doesn't pay the ~1-3s load cost on the
+    // critical path. For backend=none we leave this as None and
+    // the TranscribeResult::Stopped handler simply emits the raw
+    // STT text as the final result.
+    let ai_worker = match &ai_config {
+        Some(cfg) if cfg.backend == "llama" => {
+            if !is_tui {
+                eprintln!("Spawning AI worker (warm-model cleanup)");
+            }
+            Some(ai_worker::AiWorker::spawn(cfg.clone()))
+        }
+        _ => None,
+    };
+
     // Transcription result channel (tokio mpsc so we can select on it)
     let (transcribe_result_tx, mut transcribe_result_rx) =
         mpsc::unbounded_channel::<TranscribeResult>();
@@ -461,6 +478,15 @@ async fn main() -> Result<()> {
                         *last_snapshot_len.lock().unwrap() = 0;
                         is_recording = true;
                         partial_timer.reset();
+
+                        // Kick off the background model warm-up so the
+                        // post-stop cleanup doesn't have to load the
+                        // GGUF and prefill the system prompt on the
+                        // user's critical path. No-op when the worker
+                        // is already Warm from a previous recording.
+                        if let Some(ref worker) = ai_worker {
+                            let _ = worker.send(ai_worker::AiWorkerCmd::PreWarm);
+                        }
                     }
                     "stop" | "stop_file" => {
                         recording.store(false, Ordering::SeqCst);
@@ -513,23 +539,64 @@ async fn main() -> Result<()> {
                         let _ = event_tx.send(Event::Partial { text });
                     }
                     TranscribeResult::Stopped(text) => {
-                        // If AI cleanup is configured, spawn a task to clean the text
+                        // If AI cleanup is configured, snapshot the raw
+                        // text before shipping Stopped so we can feed it
+                        // to either the worker (hot path) or the inline
+                        // fallback (no worker, e.g. cloud backends if
+                        // they ever come back).
                         let text_for_ai = if ai_config.is_some() { Some(text.clone()) } else { None };
                         let _ = event_tx.send(Event::Stopped { text });
 
                         if let (Some(ref config), Some(raw_text)) = (&ai_config, text_for_ai) {
-                            let config = config.clone();
                             let event_tx_clone = event_tx.clone();
-                            tokio::spawn(async move {
-                                match ai::cleanup_text(&config, &raw_text).await {
-                                    Ok(cleaned) => {
-                                        let _ = event_tx_clone.send(Event::Final { text: cleaned });
-                                    }
-                                    Err(e) => {
-                                        eprintln!("AI cleanup failed: {}", e);
-                                    }
+
+                            if let Some(ref worker) = ai_worker {
+                                // Hot path: the worker likely has a warm
+                                // slot (load + prefix prefill already done
+                                // while the user was speaking). Only tail
+                                // prefill + generation remain.
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                if worker
+                                    .send(ai_worker::AiWorkerCmd::Cleanup {
+                                        raw_text,
+                                        reply: reply_tx,
+                                    })
+                                    .is_ok()
+                                {
+                                    tokio::spawn(async move {
+                                        match reply_rx.await {
+                                            Ok(Ok(cleaned)) => {
+                                                let _ = event_tx_clone
+                                                    .send(Event::Final { text: cleaned });
+                                            }
+                                            Ok(Err(e)) => {
+                                                eprintln!("AI cleanup failed: {}", e);
+                                            }
+                                            Err(_) => {
+                                                eprintln!("AI worker dropped cleanup reply");
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    eprintln!("AI worker channel closed; cleanup skipped");
                                 }
-                            });
+                            } else {
+                                // Fallback: no worker (future non-llama
+                                // backend, or the worker failed to spawn).
+                                // Run the dispatcher in a blocking task.
+                                let config = config.clone();
+                                tokio::spawn(async move {
+                                    match ai::cleanup_text(&config, &raw_text).await {
+                                        Ok(cleaned) => {
+                                            let _ = event_tx_clone
+                                                .send(Event::Final { text: cleaned });
+                                        }
+                                        Err(e) => {
+                                            eprintln!("AI cleanup failed: {}", e);
+                                        }
+                                    }
+                                });
+                            }
                         }
                     }
                 }

@@ -107,22 +107,13 @@ pub fn build_prompt(system_prompt: &str, raw_text: &str) -> String {
     )
 }
 
-/// Run cleanup synchronously. CPU-bound; callers should wrap in
-/// `spawn_blocking`. Uses greedy sampling so output is deterministic
-/// for a given input, which is important for reproducible tests and
-/// stable snapshots of cleaned transcripts.
-pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
-    if config.model.is_empty() {
-        return Err(anyhow!(
-            "--ai-model must be set to a GGUF file path for the 'llama' backend"
-        ));
-    }
-
-    let model_path = Path::new(&config.model);
+/// Load the tokenizer next to the GGUF and look up the ChatML EOS id.
+/// Shared by the cold-path `cleanup_text_sync` and the warm-path
+/// `AiWorker` so both agree on the tokenizer vocabulary.
+pub fn load_tokenizer(model_path: &Path) -> Result<(Tokenizer, u32)> {
     let tokenizer_path = find_tokenizer_path(model_path)?;
     let tokenizer = Tokenizer::from_file(&tokenizer_path)
         .map_err(|e| anyhow!("failed to load tokenizer {}: {}", tokenizer_path.display(), e))?;
-
     // Qwen2.5 uses `<|im_end|>` as the end-of-turn token. If the
     // tokenizer vocab doesn't expose it under that literal, something
     // upstream is wrong (wrong tokenizer file for this model family)
@@ -132,16 +123,45 @@ pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
         .get("<|im_end|>")
         .copied()
         .ok_or_else(|| anyhow!("tokenizer missing <|im_end|> — wrong tokenizer for this model?"))?;
+    Ok((tokenizer, eos_token_id))
+}
 
-    let device = Device::Cpu;
+/// Parse the GGUF at `model_path` and materialize a fresh
+/// `ModelWeights`. Expensive (hundreds of MB of quantized tensors).
+pub fn load_model(model_path: &Path, device: &Device) -> Result<ModelWeights> {
     let mut file = std::fs::File::open(model_path)
-        .with_context(|| format!("failed to open GGUF model: {}", config.model))?;
+        .with_context(|| format!("failed to open GGUF model: {}", model_path.display()))?;
     let content = gguf_file::Content::read(&mut file)
-        .with_context(|| format!("failed to parse GGUF: {}", config.model))?;
-    let mut model = ModelWeights::from_gguf(content, &mut file, &device)
-        .context("failed to initialize model from GGUF weights")?;
+        .with_context(|| format!("failed to parse GGUF: {}", model_path.display()))?;
+    ModelWeights::from_gguf(content, &mut file, device)
+        .context("failed to initialize model from GGUF weights")
+}
 
-    let prompt = build_prompt(&config.system_prompt, raw_text);
+/// Run the full cleanup (prompt tokenization, prefill, greedy
+/// generation) on a model whose KV cache is fresh (no prior
+/// `forward` calls). Consumes the model's cache-growth budget —
+/// callers must drop this model and load a new one for any
+/// subsequent request.
+///
+/// Why not pre-fill the prefix separately and reuse the cache?
+/// candle 0.8's `quantized_qwen2::ModelWeights::forward` builds a
+/// square causal mask sized to the input's `seq_len` and broadcasts
+/// it against attention shaped `[batch, seq_len, heads, kv_len]`.
+/// For `seq_len > 1` with `index_pos > 0` (i.e. multi-token prefill
+/// past an existing cache) the mask shape doesn't fit — the forward
+/// fails with a broadcast error. So the warm path still has to run
+/// the whole prompt as one `forward(_, 0)` call. What the AiWorker
+/// saves is the dominant GGUF load (1-3s); prefill itself stays on
+/// the post-stop critical path.
+pub fn run_cleanup_on_fresh_model(
+    model: &mut ModelWeights,
+    tokenizer: &Tokenizer,
+    eos_token_id: u32,
+    system_prompt: &str,
+    raw_text: &str,
+    device: &Device,
+) -> Result<String> {
+    let prompt = build_prompt(system_prompt, raw_text);
     // `add_special_tokens = false` because our prompt already contains
     // the ChatML specials — letting the tokenizer add its own would
     // double-BOS the stream.
@@ -155,14 +175,11 @@ pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
 
     let mut logits_processor = LogitsProcessor::from_sampling(SAMPLER_SEED, Sampling::ArgMax);
 
-    // Prefill: single forward pass over the whole prompt, taking the
-    // last-position logits as the next-token distribution. `index_pos`
-    // = 0 tells the KV cache this is a fresh sequence.
-    let input = Tensor::new(prompt_tokens.as_slice(), &device)?.unsqueeze(0)?;
+    // Prefill: one forward over the full prompt at position 0.
+    let input = Tensor::new(prompt_tokens.as_slice(), device)?.unsqueeze(0)?;
     let logits = model.forward(&input, 0)?;
     let logits = logits.squeeze(0)?.to_dtype(candle_core::DType::F32)?;
     let logits = if logits.dims().len() > 1 {
-        // Some model impls return [seq, vocab]; take the final step.
         let last = logits.dims()[0] - 1;
         logits.get(last)?
     } else {
@@ -179,7 +196,7 @@ pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
         }
         generated.push(next_token);
 
-        let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
+        let input = Tensor::new(&[next_token], device)?.unsqueeze(0)?;
         let logits = model.forward(&input, n_cur)?;
         let logits = logits.squeeze(0)?.to_dtype(candle_core::DType::F32)?;
         let logits = if logits.dims().len() > 1 {
@@ -197,6 +214,37 @@ pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
         .map_err(|e| anyhow!("failed to decode output: {}", e))?;
 
     Ok(text.trim().to_string())
+}
+
+/// Run cleanup synchronously, loading the model cold each call.
+/// CPU-bound; callers should wrap in `spawn_blocking`. Uses greedy
+/// sampling so output is deterministic for a given input, which is
+/// important for reproducible tests and stable snapshots of cleaned
+/// transcripts.
+///
+/// This is the fallback path: used when the `AiWorker` isn't
+/// available (e.g. backend=none dispatches elsewhere, or the worker
+/// errored out) and by the integration tests that don't set up a
+/// worker. The hot path for live recordings goes through the worker.
+pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
+    if config.model.is_empty() {
+        return Err(anyhow!(
+            "--ai-model must be set to a GGUF file path for the 'llama' backend"
+        ));
+    }
+
+    let model_path = Path::new(&config.model);
+    let (tokenizer, eos_token_id) = load_tokenizer(model_path)?;
+    let device = Device::Cpu;
+    let mut model = load_model(model_path, &device)?;
+    run_cleanup_on_fresh_model(
+        &mut model,
+        &tokenizer,
+        eos_token_id,
+        &config.system_prompt,
+        raw_text,
+        &device,
+    )
 }
 
 /// Async wrapper so the HTTP and local backends share a call-site
