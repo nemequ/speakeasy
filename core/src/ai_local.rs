@@ -160,6 +160,7 @@ pub fn run_cleanup_on_fresh_model(
     system_prompt: &str,
     raw_text: &str,
     device: &Device,
+    mut on_delta: Option<&mut dyn FnMut(&str)>,
 ) -> Result<String> {
     let prompt = build_prompt(system_prompt, raw_text);
     // `add_special_tokens = false` because our prompt already contains
@@ -189,12 +190,34 @@ pub fn run_cleanup_on_fresh_model(
     let mut next_token = logits_processor.sample(&logits)?;
     let mut n_cur = prompt_tokens.len();
     let mut generated: Vec<u32> = Vec::with_capacity(MAX_NEW_TOKENS);
+    // Running byte-length of the decoded-so-far text, used to slice
+    // off the new suffix for the streaming callback. Decoding the
+    // full `generated` slice each step is O(n²) in output length but
+    // MAX_NEW_TOKENS is capped at 512 so the cost stays in the noise;
+    // trying to decode individual tokens breaks on multi-byte UTF-8
+    // that straddles token boundaries.
+    let mut emitted_len = 0usize;
 
     for _ in 0..MAX_NEW_TOKENS {
         if next_token == eos_token_id {
             break;
         }
         generated.push(next_token);
+
+        if let Some(ref mut cb) = on_delta {
+            if let Ok(text_so_far) = tokenizer.decode(&generated, true) {
+                if text_so_far.len() > emitted_len {
+                    // Ensure we slice on a UTF-8 char boundary; the
+                    // tokenizer should only ever return whole chars,
+                    // but guard anyway so a malformed decode can't
+                    // panic the worker thread.
+                    if text_so_far.is_char_boundary(emitted_len) {
+                        cb(&text_so_far[emitted_len..]);
+                        emitted_len = text_so_far.len();
+                    }
+                }
+            }
+        }
 
         let input = Tensor::new(&[next_token], device)?.unsqueeze(0)?;
         let logits = model.forward(&input, n_cur)?;
@@ -244,6 +267,7 @@ pub fn cleanup_text_sync(config: &AiConfig, raw_text: &str) -> Result<String> {
         &config.system_prompt,
         raw_text,
         &device,
+        None,
     )
 }
 

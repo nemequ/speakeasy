@@ -70,6 +70,18 @@ pub async fn run_tui(
                     s.transcription = text;
                     s.status = "AI Cleaned".to_string();
                 }
+                Event::Delta { text } => {
+                    // Stream AI-cleanup chunks into the TUI view as
+                    // they arrive so the user sees progress instead
+                    // of a jump from raw STT to cleaned text. The
+                    // first delta in a cleanup pass replaces the
+                    // raw-STT text that Stopped left in the view.
+                    if s.status != "AI Cleaning..." {
+                        s.transcription.clear();
+                        s.status = "AI Cleaning...".to_string();
+                    }
+                    s.transcription.push_str(&text);
+                }
                 Event::Error { message } => {
                     s.status = format!("Error: {}", message);
                 }

@@ -71,6 +71,12 @@ pub enum Event {
     Ready,
     Partial { text: String },
     Final { text: String },
+    // Incremental chunk of AI-cleanup output. Emitted repeatedly from
+    // the AI worker's generation loop as tokens are decoded, so the
+    // UI can stream the cleaned text into the overlay instead of
+    // staring at a spinner. Concatenating every `Delta` between one
+    // `Stopped` and the next `Final` reconstructs the cleaned text.
+    Delta { text: String },
     Level { rms: f64, peak: f64 },
     // Emitted immediately after a `stop` command is accepted, before
     // the final whisper decode runs. The JS-side stop watchdog treats
@@ -554,11 +560,14 @@ async fn main() -> Result<()> {
                                 // Hot path: the worker likely has a warm
                                 // slot (load + prefix prefill already done
                                 // while the user was speaking). Only tail
-                                // prefill + generation remain.
+                                // prefill + generation remain. Pass a
+                                // clone of `event_tx` so the worker can
+                                // emit streaming `Delta` events.
                                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                                 if worker
                                     .send(ai_worker::AiWorkerCmd::Cleanup {
                                         raw_text,
+                                        event_tx: Some(event_tx.clone()),
                                         reply: reply_tx,
                                     })
                                     .is_ok()

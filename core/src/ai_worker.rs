@@ -45,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::ai::AiConfig;
 use crate::ai_local;
+use crate::Event;
 
 /// Commands the main loop can send to the worker.
 pub enum AiWorkerCmd {
@@ -56,8 +57,16 @@ pub enum AiWorkerCmd {
     /// slot if one is ready, otherwise falls through to a cold
     /// load (correct but slower — same latency as the pre-worker
     /// implementation).
+    ///
+    /// If `event_tx` is provided, the worker emits an
+    /// `Event::Delta { text }` for each generated chunk so the
+    /// parent UI can stream cleanup into the overlay instead of
+    /// showing an opaque spinner. The terminal full-text result
+    /// still arrives via `reply` — the caller is responsible for
+    /// turning that into an `Event::Final`.
     Cleanup {
         raw_text: String,
+        event_tx: Option<mpsc::UnboundedSender<Event>>,
         reply: oneshot::Sender<Result<String>>,
     },
 }
@@ -135,7 +144,26 @@ fn run(config: AiConfig, mut cmd_rx: mpsc::UnboundedReceiver<AiWorkerCmd>) -> Re
                 }
             }
 
-            AiWorkerCmd::Cleanup { raw_text, reply } => {
+            AiWorkerCmd::Cleanup { raw_text, event_tx, reply } => {
+                // Streaming callback: emit each new chunk of decoded
+                // output through the event channel as `Event::Delta`.
+                // Shadowed per-call so we don't accidentally reuse a
+                // closure across requests.
+                let delta_sender = event_tx.clone();
+                let mut delta_cb = move |text: &str| {
+                    if text.is_empty() {
+                        return;
+                    }
+                    if let Some(ref tx) = delta_sender {
+                        let _ = tx.send(Event::Delta { text: text.to_string() });
+                    }
+                };
+                let on_delta: Option<&mut dyn FnMut(&str)> = if event_tx.is_some() {
+                    Some(&mut delta_cb)
+                } else {
+                    None
+                };
+
                 let result = match std::mem::replace(&mut state, WorkerState::Empty) {
                     WorkerState::Warm { mut model } => {
                         let t = Instant::now();
@@ -146,6 +174,7 @@ fn run(config: AiConfig, mut cmd_rx: mpsc::UnboundedReceiver<AiWorkerCmd>) -> Re
                             &config.system_prompt,
                             &raw_text,
                             &device,
+                            on_delta,
                         );
                         eprintln!(
                             "ai_worker: warm cleanup took {:.2}s",
@@ -159,10 +188,24 @@ fn run(config: AiConfig, mut cmd_rx: mpsc::UnboundedReceiver<AiWorkerCmd>) -> Re
                         // warm-up finished (very short utterance, or
                         // PreWarm never arrived). Do the full path
                         // inline so the result is still produced, just
-                        // with the pre-worker latency.
+                        // with the pre-worker latency. Streaming
+                        // still works — we just pay the cold load
+                        // before the first delta arrives.
                         eprintln!("ai_worker: no warm slot, running cold cleanup");
                         let t = Instant::now();
-                        let res = ai_local::cleanup_text_sync(&config, &raw_text);
+                        let res = (|| -> Result<String> {
+                            let model_path: PathBuf = config.model.clone().into();
+                            let mut model = ai_local::load_model(&model_path, &device)?;
+                            ai_local::run_cleanup_on_fresh_model(
+                                &mut model,
+                                &tokenizer,
+                                eos_token_id,
+                                &config.system_prompt,
+                                &raw_text,
+                                &device,
+                                on_delta,
+                            )
+                        })();
                         eprintln!(
                             "ai_worker: cold cleanup took {:.2}s",
                             t.elapsed().as_secs_f64()
