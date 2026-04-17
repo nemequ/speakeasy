@@ -11,9 +11,7 @@ import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import {Recorder} from './recorder.js';
 import {KeybindingManager, State} from './keybinding.js';
 import {Output} from './output.js';
-import {AICleanup} from './ai.js';
-import {OllamaCleanup} from './ollama.js';
-import {OpenRouterCleanup} from './openrouter.js';
+import {makeNoopAi} from './aiNoop.js';
 import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
@@ -434,34 +432,18 @@ export default class SpeakeasyExtension extends Extension {
     }
 
     /**
-     * Create (or recreate) the AI cleanup backend based on settings.
-     * Both AICleanup and OllamaCleanup implement the same interface,
-     * so extension.js doesn't need to know which one is active.
+     * Install the no-op AI stub. The Rust core owns cleanup in-process
+     * and streams the cleaned result back as a `final` event; the
+     * controller still expects an AI-shaped object to call
+     * beginSession/feedText/finalize on, so we hand it a passthrough
+     * whose isAvailable() returns false.
      */
     _createAIBackend() {
         if (this._ai) {
             this._ai.destroy();
             this._ai = null;
         }
-
-        const backend = this._settings.get_string('ai-backend');
-        if (backend === 'ollama') {
-            log('Speakeasy: using Ollama backend');
-            this._ai = new OllamaCleanup();
-        } else if (backend === 'openrouter') {
-            log('Speakeasy: using OpenRouter backend');
-            this._ai = new OpenRouterCleanup();
-        } else {
-            log('Speakeasy: using Anthropic backend');
-            this._ai = new AICleanup();
-        }
-
-        this._ai.setExtensionDir(this.path);
-        this._ai.setSettings(this._settings);
-        this._ai.init();
-
-        // Push the new backend into the controller (it may have been
-        // constructed with the previous one).
+        this._ai = makeNoopAi();
         this._controller?.setAi(this._ai);
     }
 
@@ -1151,37 +1133,13 @@ export default class SpeakeasyExtension extends Extension {
     }
 
     /**
-     * Build a fresh AI backend instance configured the same way as
-     * the live one. Used by the recovery cleanup so it can never
-     * collide with an in-flight normal dictation session — both
-     * AICleanup and OllamaCleanup keep per-instance session state
-     * (active session UUID, chunk buffer, conversation history),
-     * and feeding a recovered transcript through the live instance
-     * would clobber the live state.
-     *
-     * Returns null if no AI backend is configured or if init fails.
-     * Caller is responsible for calling .destroy() when done.
+     * Previously returned a fresh AI backend for recovery cleanup.
+     * Cleanup now runs in the Rust core per-recording, so there is
+     * no in-process AI to re-run on recovered transcripts. Returning
+     * null disables the recovery-cleanup path cleanly.
      */
     _createIsolatedAi() {
-        if (!this._settings)
-            return null;
-        const backend = this._settings.get_string('ai-backend');
-        let ai;
-        try {
-            ai = backend === 'ollama' ? new OllamaCleanup() : new AICleanup();
-            ai.setExtensionDir(this.path);
-            ai.setSettings(this._settings);
-            if (!ai.init())
-                return null;
-        } catch (e) {
-            log(`Speakeasy: failed to create isolated AI: ${e.message}`);
-            return null;
-        }
-        if (!ai.isAvailable()) {
-            ai.destroy();
-            return null;
-        }
-        return ai;
+        return null;
     }
 
     /**

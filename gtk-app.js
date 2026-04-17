@@ -27,8 +27,7 @@ import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk?version=4.0';
 
 import {Recorder} from './recorder.js';
-import {AICleanup} from './ai.js';
-import {OllamaCleanup} from './ollama.js';
+import {makeNoopAi} from './aiNoop.js';
 import {recoverOrphans} from './sessionLog.js';
 import {DictationController, ControllerState} from './controller.js';
 import {FileTranscriber} from './fileTranscribe.js';
@@ -139,39 +138,10 @@ app.connect('activate', () => {
         resultView.tv.scroll_mark_onscreen(mark);
     });
 
-    // ── Build the AI backend ──
-    // Create the real AI object, which is needed for recovery from file.
-    function makeAi() {
-        const backend = settings.get_string('ai-backend');
-        const ai = backend === 'ollama' ? new OllamaCleanup() : new AICleanup();
-        ai.setExtensionDir(PROJECT_DIR);
-        ai.setSettings(settings);
-        ai.init();
-        return ai;
-    }
-    const realAi = makeAi(); // Always create the real object
-
-    // Determine the AI object to pass to the DictationController for live use.
-    // If the Rust core is configured with an AI backend (i.e., JS backend is NOT 'none'),
-    // the JS AI object's feedText method is made a no-op to prevent double-cleaning.
-    // The realAi object is kept available for recovery functionality.
-    let controllerAi;
-    const jsAiBackend = settings.get_string('ai-backend');
-
-    if (jsAiBackend !== 'none') {
-        // Rust core is active. Use a no-op AI for live dictation path.
-        controllerAi = {
-            ...realAi, // Inherit methods like finalize, which are needed for recovery
-            feedText: async () => { /* No-op for live dictation */ },
-            isAvailable: () => false, // Indicate it's not available for live use
-        };
-        print('[gtk-app] Live AI dictation path bypassed; Rust core is handling cleanup.');
-    } else {
-        // JS AI backend is 'none'. Pass the realAi object directly to the controller.
-        controllerAi = realAi;
-        print('[gtk-app] JS AI backend set to None.');
-    }
-    let ai = controllerAi; // Use controllerAi for DictationController constructor and setAi
+    // The Rust core owns AI cleanup now. The JS side only needs a
+    // stub that satisfies the controller's AI interface; cleaned text
+    // arrives separately via recorder.onAiCleanedText (see above).
+    const ai = makeNoopAi();
 
     // ── Build the window ──
     const window = new Gtk.ApplicationWindow({

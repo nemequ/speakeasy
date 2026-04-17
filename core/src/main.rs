@@ -2,15 +2,6 @@ mod tui;
 mod ai;
 mod ai_local;
 
-/// Dispatch AI cleanup to the right backend (local llama.cpp vs.
-/// HTTP-based openrouter/ollama). Call sites don't need to know which.
-async fn ai_cleanup(config: &ai::AiConfig, raw_text: &str) -> Result<String> {
-    match config.backend.as_str() {
-        "llama" => ai_local::cleanup_text(config, raw_text).await,
-        _ => ai::cleanup_text(config, raw_text).await,
-    }
-}
-
 use anyhow::{Context, Result};
 use hound::{WavReader, WavSpec, WavWriter, SampleFormat};
 use clap::Parser;
@@ -59,25 +50,16 @@ struct Args {
     #[arg(long, default_value_t = 1.5)]
     partial_interval: f64,
 
-    /// AI backend for text cleanup (llama, openrouter, ollama, or none).
-    /// `llama` runs a local GGUF model in-process via llama.cpp; set
-    /// --ai-model to the GGUF file path.
+    /// AI backend for text cleanup: 'llama' (local GGUF via candle) or 'none'.
+    /// When 'llama', set --ai-model to the GGUF file path.
     #[arg(long, default_value = "none")]
     ai_backend: String,
 
-    /// API key for AI backend (required for openrouter)
-    #[arg(long)]
-    ai_api_key: Option<String>,
-
-    /// AI model to use
+    /// Path to the GGUF model file (for --ai-backend llama).
     #[arg(long)]
     ai_model: Option<String>,
 
-    /// Override API base URL
-    #[arg(long)]
-    ai_url: Option<String>,
-
-    /// Path to system prompt file
+    /// Path to system prompt file.
     #[arg(long)]
     system_prompt_path: Option<String>,
 }
@@ -196,24 +178,9 @@ async fn main() -> Result<()> {
 
     let ai_config = if args.ai_backend != "none" {
         let binary_path = std::env::current_exe().unwrap_or_default();
-        // For `llama`, `model` is a GGUF file path with no defaulting —
-        // ai_local::cleanup_text_sync returns a helpful error if empty.
-        // For HTTP backends, we fall back to per-backend defaults.
-        let model = if args.ai_backend == "llama" {
-            args.ai_model.clone().unwrap_or_default()
-        } else {
-            args.ai_model
-                .clone()
-                .unwrap_or_else(|| ai::get_default_model(&args.ai_backend).to_string())
-        };
-        let url = args.ai_url
-            .clone()
-            .unwrap_or_else(|| ai::get_default_url(&args.ai_backend).to_string());
         Some(ai::AiConfig {
             backend: args.ai_backend.clone(),
-            api_key: args.ai_api_key.clone(),
-            model,
-            url,
+            model: args.ai_model.clone().unwrap_or_default(),
             system_prompt: ai::load_system_prompt(args.system_prompt_path.as_deref(), &binary_path),
         })
     } else {
@@ -222,7 +189,7 @@ async fn main() -> Result<()> {
 
     if let Some(ref config) = ai_config {
         if !is_tui {
-            eprintln!("AI Backend: {}, Model: {}, URL: {}", config.backend, config.model, config.url);
+            eprintln!("AI Backend: {}, Model: {}", config.backend, config.model);
         }
     }
 
@@ -311,7 +278,7 @@ async fn main() -> Result<()> {
 
             if let Some(ref config) = ai_config {
                 let cleanup_start = Instant::now();
-                match ai_cleanup(config, &text).await {
+                match ai::cleanup_text(config, &text).await {
                     Ok(cleaned) => {
                         let cleanup_time = cleanup_start.elapsed().as_secs_f64();
                         println!("AI Cleaned: {}", cleaned);
@@ -534,7 +501,7 @@ async fn main() -> Result<()> {
                             let config = config.clone();
                             let event_tx_clone = event_tx.clone();
                             tokio::spawn(async move {
-                                match ai_cleanup(&config, &raw_text).await {
+                                match ai::cleanup_text(&config, &raw_text).await {
                                     Ok(cleaned) => {
                                         let _ = event_tx_clone.send(Event::Final { text: cleaned });
                                     }

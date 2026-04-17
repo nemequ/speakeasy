@@ -260,9 +260,7 @@ mod tests {
     fn cleanup_sync_errors_when_model_path_empty() {
         let cfg = AiConfig {
             backend: "llama".into(),
-            api_key: None,
             model: String::new(),
-            url: String::new(),
             system_prompt: String::new(),
         };
         let err = cleanup_text_sync(&cfg, "anything").expect_err("empty model should error");
@@ -307,9 +305,7 @@ mod tests {
 
         let cfg = AiConfig {
             backend: "llama".into(),
-            api_key: None,
             model,
-            url: String::new(),
             system_prompt:
                 "You are a helpful assistant that cleans up dictated speech. Output ONLY the cleaned text with no preamble."
                     .into(),
