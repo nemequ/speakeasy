@@ -81,6 +81,10 @@ export class DictationController {
      * @param {function(number,number)} [opts.onLevel]   - audio level (rms,peak in dB)
      * @param {function(object)} [opts.onTranscript]     - transcript saved entry
      * @param {function(string)} [opts.onError]          - non-fatal error message for the UI
+     * @param {function(string)} [opts.onDiscardedText]  - fires when a discarded
+     *   recording (user tapped cancel) nonetheless produces non-empty whisper
+     *   text after the fact. Lets the UI offer recovery so the transcript
+     *   isn't silently dropped.
      * @param {function(string)} [opts.onLog]            - optional log sink
      *   (defaults to global `log()` if available, otherwise console.log)
      */
@@ -99,6 +103,7 @@ export class DictationController {
         this._onLevel = opts.onLevel ?? null;
         this._onTranscript = opts.onTranscript ?? null;
         this._onError = opts.onError ?? null;
+        this._onDiscardedText = opts.onDiscardedText ?? null;
         this._log = opts.onLog ?? ((msg) => {
             // GJS exposes a global log() inside GNOME Shell; outside
             // the compositor we fall back to console.log.
@@ -277,8 +282,22 @@ export class DictationController {
         if (this._state === ControllerState.IDLE)
             return;
 
-        try { this._recorder.stop(); } catch (_e) { /* ignore */ }
-        try { this._recorder.deleteAudio(); } catch (_e) { /* ignore */ }
+        // Kick the stop and keep its promise so if whisper eventually
+        // produces non-empty text, we can surface it for recovery
+        // rather than dropping it on the floor. Don't block the state
+        // transition — the UI should return to IDLE immediately.
+        const recorder = this._recorder;
+        Promise.resolve(recorder.stop())
+            .then((text) => {
+                const trimmed = (text || '').trim();
+                if (trimmed && this._onDiscardedText) {
+                    try { this._onDiscardedText(trimmed); }
+                    catch (e) { this._log(`Speakeasy controller: onDiscardedText threw: ${e.message}`); }
+                }
+            })
+            .catch((e) => this._log(`Speakeasy controller: discard stop failed: ${e.message}`));
+
+        try { recorder.deleteAudio(); } catch (_e) { /* ignore */ }
         try { this._ai.cancelSession?.(); } catch (_e) { /* ignore */ }
         try { this._sessionLog?.markCompleted(); } catch (_e) { /* ignore */ }
         this._sessionLog = null;

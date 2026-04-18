@@ -3,6 +3,7 @@
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -239,6 +240,7 @@ export default class SpeakeasyExtension extends Extension {
                 }
             },
             onError: (msg) => this._notify(msg),
+            onDiscardedText: (text) => this._notifyDiscardedText(text),
         });
 
         // Create keybinding manager with settings for timing parameters
@@ -455,6 +457,43 @@ export default class SpeakeasyExtension extends Extension {
             source.addNotification(notification);
         } catch (e) {
             log(`Speakeasy: notification failed: ${e.message} — body was: ${body}`);
+        }
+    }
+
+    /**
+     * Surface a discarded-but-transcribed recording so the user can
+     * recover it. Shows a persistent notification with a Copy action
+     * that puts the text on the clipboard — clipboard is left alone
+     * until the user clicks.
+     */
+    _notifyDiscardedText(text) {
+        log(`Speakeasy: discarded recording produced ${text.length} chars — offering recovery`);
+        try {
+            const source = new MessageTray.Source({
+                title: 'Speakeasy',
+                iconName: 'audio-input-microphone-symbolic',
+            });
+            Main.messageTray.add(source);
+            const preview = text.length > 80 ? text.slice(0, 80) + '…' : text;
+            const notification = new MessageTray.Notification({
+                source,
+                title: `Discarded recording: ${text.length} chars recovered`,
+                body: preview,
+                isTransient: false,
+                urgency: MessageTray.Urgency.NORMAL,
+            });
+            notification.addAction('Copy', () => {
+                try {
+                    St.Clipboard.get_default().set_text(
+                        St.ClipboardType.CLIPBOARD, text);
+                    log(`Speakeasy: copied ${text.length} recovered chars to clipboard`);
+                } catch (e) {
+                    log(`Speakeasy: clipboard copy failed: ${e.message}`);
+                }
+            });
+            source.addNotification(notification);
+        } catch (e) {
+            log(`Speakeasy: recovery notification failed: ${e.message}`);
         }
     }
 

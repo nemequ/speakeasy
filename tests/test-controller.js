@@ -152,6 +152,7 @@ function makeController({
         finals: [],
         transcripts: [],
         errors: [],
+        discardedTexts: [],
     };
 
     const controller = new DictationController({
@@ -166,6 +167,7 @@ function makeController({
         onFinalText: (t) => events.finals.push(t),
         onTranscript: (e) => events.transcripts.push(e),
         onError: (m) => events.errors.push(m),
+        onDiscardedText: (t) => events.discardedTexts.push(t),
         onLog: () => {},  // silence test output
     });
 
@@ -462,6 +464,46 @@ const loop = GLib.MainLoop.new(null, false);
             assertEqual(t.controller.getState(), ControllerState.IDLE, 'idle');
             assertEqual(t.recorder._deleteCalled, true, 'audio deleted');
             assertEqual(t.ai._sessionCancelled, true, 'ai cancelled');
+        } finally {
+            rmrf(t.tmpDir);
+        }
+    });
+
+    await test('discard() surfaces late whisper text via onDiscardedText', async () => {
+        // Regression guard: discard() used to drop the recorder.stop()
+        // promise's text on the floor. Long recordings that were
+        // discarded-by-accident lost their transcript entirely. Now
+        // the controller forwards non-empty late text to the caller
+        // so the UI can offer recovery (clipboard copy, etc).
+        const t = makeController();
+        try {
+            t.controller.start();
+            t.recorder.setStopText('the rescued 3-minute dictation');
+            t.controller.discard();
+
+            // State flips synchronously...
+            assertEqual(t.controller.getState(), ControllerState.IDLE, 'idle');
+            assertEqual(t.recorder._deleteCalled, true, 'audio deleted');
+
+            // ...but the stop promise resolves on the next tick, so
+            // onDiscardedText fires asynchronously.
+            await new Promise(r => GLib.idle_add(GLib.PRIORITY_DEFAULT, () => { r(); return false; }));
+            assertEqual(t.events.discardedTexts.length, 1, 'one recovery fired');
+            assertEqual(t.events.discardedTexts[0], 'the rescued 3-minute dictation',
+                'exact text handed through');
+        } finally {
+            rmrf(t.tmpDir);
+        }
+    });
+
+    await test('discard() with empty whisper text does NOT fire onDiscardedText', async () => {
+        const t = makeController();
+        try {
+            t.controller.start();
+            t.recorder.setStopText('');
+            t.controller.discard();
+            await new Promise(r => GLib.idle_add(GLib.PRIORITY_DEFAULT, () => { r(); return false; }));
+            assertEqual(t.events.discardedTexts.length, 0, 'no recovery when text is empty');
         } finally {
             rmrf(t.tmpDir);
         }
