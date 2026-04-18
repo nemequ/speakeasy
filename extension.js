@@ -240,6 +240,14 @@ export default class SpeakeasyExtension extends Extension {
             },
             onError: (msg) => this._notify(msg),
             onDiscardedText: (text) => this._notifyDiscardedText(text),
+            onProgressStep: (step) => {
+                const caption = {
+                    finalizing: 'Finalizing transcription\u2026',
+                    cleanup:    'AI cleanup\u2026',
+                    pasting:    'Pasting\u2026',
+                }[step] ?? step;
+                this._overlay?.setStatusText(caption);
+            },
         });
 
         // Create keybinding manager with settings for timing parameters

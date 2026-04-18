@@ -85,6 +85,8 @@ export class DictationController {
      *   recording (user tapped cancel) nonetheless produces non-empty whisper
      *   text after the fact. Lets the UI offer recovery so the transcript
      *   isn't silently dropped.
+     * @param {function(string)} [opts.onProgressStep]   - fires at each stop-pipeline
+     *   step so the UI can surface a caption: 'finalizing', 'cleanup', 'pasting'.
      * @param {function(string)} [opts.onLog]            - optional log sink
      *   (defaults to global `log()` if available, otherwise console.log)
      */
@@ -104,6 +106,7 @@ export class DictationController {
         this._onTranscript = opts.onTranscript ?? null;
         this._onError = opts.onError ?? null;
         this._onDiscardedText = opts.onDiscardedText ?? null;
+        this._onProgressStep = opts.onProgressStep ?? null;
         this._log = opts.onLog ?? ((msg) => {
             // GJS exposes a global log() inside GNOME Shell; outside
             // the compositor we fall back to console.log.
@@ -250,8 +253,15 @@ export class DictationController {
         this._sessionLog = null;
         this._committed = false;
 
-        const rawText = await recorder.stop();
+        // Transition to PROCESSING up front so the overlay switches
+        // from the recording UI (waveform + partials) to the spinner
+        // the instant the user releases the trigger. The whisper tail
+        // decode can take seconds on long recordings; without this
+        // the overlay looks frozen-in-recording-mode that whole time.
         this._setState(ControllerState.PROCESSING);
+        this._fireProgress('finalizing');
+
+        const rawText = await recorder.stop();
 
         this._stopPromise = (async () => {
             try {
@@ -347,6 +357,7 @@ export class DictationController {
         } else if (!ai.isAvailable?.()) {
             this._log('Speakeasy controller: AI unavailable — outputting raw STT text');
         } else {
+            this._fireProgress('cleanup');
             try {
                 const cleaned = await ai.finalize(null);
                 if (cleaned !== null && cleaned.trim() !== '') {
@@ -387,6 +398,7 @@ export class DictationController {
                 this._log('Speakeasy controller: autoPaste disabled, skipping output.typeText');
                 transcriptOk = true;
             } else {
+                this._fireProgress('pasting');
                 this._log(`Speakeasy controller: outputting text: "${textToOutput}"`);
                 if (output) {
                     try {
@@ -508,6 +520,14 @@ export class DictationController {
             this._onError?.(msg);
         } catch (e) {
             this._log(`Speakeasy controller: onError callback error: ${e.message}`);
+        }
+    }
+
+    _fireProgress(step) {
+        try {
+            this._onProgressStep?.(step);
+        } catch (e) {
+            this._log(`Speakeasy controller: onProgressStep callback error: ${e.message}`);
         }
     }
 

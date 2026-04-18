@@ -244,8 +244,11 @@ class RecordingOverlay extends St.BoxLayout {
         });
         this._statusBox.add_child(this._spinner);
 
+        // Default caption. The controller overrides this via
+        // setStatusText() as the stop-pipeline progresses through
+        // finalize-transcription / AI-cleanup / paste.
         this._statusLabel = new St.Label({
-            text: 'Performing post-transcription cleanup\u2026',
+            text: 'Finalizing transcription\u2026',
             style_class: 'speakeasy-overlay-status-text',
         });
         this._statusBox.add_child(this._statusLabel);
@@ -296,6 +299,17 @@ class RecordingOverlay extends St.BoxLayout {
         this._applyMode();
         if (!this.visible)
             super.show();
+    }
+
+    /**
+     * Replace the processing-mode caption next to the spinner. Called
+     * by the controller at each stop-pipeline step so the user can
+     * see which hop is running (finalize, AI cleanup, paste).
+     * @param {string} text
+     */
+    setStatusText(text) {
+        if (this._statusLabel)
+            this._statusLabel.text = text;
     }
 
     /**
