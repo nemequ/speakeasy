@@ -298,10 +298,13 @@ export default class SpeakeasyExtension extends Extension {
         );
 
         // Wire up the toggle switch for click-to-record. Toggle
-        // implies an intentional recording, so we commit immediately.
+        // implies an intentional, hands-free recording, so we jump
+        // straight to LOCKED — not RECORDING — so a subsequent tap
+        // of the keyboard shortcut stops it instead of being treated
+        // as a quick-tap-and-discard. Also commit immediately.
         this._panelIcon.onToggleRecording((active) => {
             if (active) {
-                this._keybinding.forceState(State.RECORDING);
+                this._keybinding.forceState(State.LOCKED);
                 this._startRecording();
                 this._controller.commit();
             } else {
