@@ -98,13 +98,6 @@ const app = new Gtk.Application({
 app.connect('activate', () => {
     const settings = loadSettings();
 
-    // Migrate user to whisper backend if they are still on vosk or dlgo
-    const currentStt = settings.get_string('stt-backend');
-    if (currentStt === 'vosk' || currentStt === 'dlgo') {
-        print(`[gtk-app] migrating stt-backend from ${currentStt} to whisper`);
-        settings.set_string('stt-backend', 'whisper');
-    }
-
     // Recover any orphan session logs from a previous crash.
     try {
         const transcriptDir = GLib.build_filenamev([

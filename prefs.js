@@ -143,6 +143,11 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         storageGroup.add(retainAudioRow);
 
+        // paste-method is schema'd as an enum, so it's a *string* to
+        // GSettings ('shift-insert' etc.) but Adw.ComboRow's 'selected'
+        // is a guint. Binding directly crashes with a type mismatch,
+        // so convert manually like audio-input-device does below.
+        const pasteMethodNicks = ['shift-insert', 'ctrl-v', 'ctrl-shift-v'];
         const pasteMethodRow = new Adw.ComboRow({
             title: _('Paste Method'),
             subtitle: _('Keyboard shortcut used to insert text into the focused application.'),
@@ -154,8 +159,20 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
                 ],
             }),
         });
-        settings.bind('paste-method', pasteMethodRow, 'selected',
-            Gio.SettingsBindFlags.DEFAULT);
+        const currentPaste = settings.get_string('paste-method');
+        const pasteIdx = pasteMethodNicks.indexOf(currentPaste);
+        pasteMethodRow.selected = pasteIdx >= 0 ? pasteIdx : 0;
+        pasteMethodRow.connect('notify::selected', () => {
+            const sel = pasteMethodRow.selected;
+            if (sel >= 0 && sel < pasteMethodNicks.length)
+                settings.set_string('paste-method', pasteMethodNicks[sel]);
+        });
+        settings.connect('changed::paste-method', () => {
+            const val = settings.get_string('paste-method');
+            const i = pasteMethodNicks.indexOf(val);
+            if (i >= 0 && pasteMethodRow.selected !== i)
+                pasteMethodRow.selected = i;
+        });
         storageGroup.add(pasteMethodRow);
 
         const audioDirRow = new Adw.EntryRow({
@@ -210,8 +227,8 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
         // committing to a real dictation. The prefs window runs in
         // a separate process from the live extension, so we can't
         // reuse the extension's recorder/AI instances — the GTK app
-        // builds its own. That's heavy (a second VOSK load) but
-        // acceptable for an explicit "test the pipeline" action.
+        // builds its own. That's heavy (a second whisper model load)
+        // but acceptable for an explicit "test the pipeline" action.
         const healthGroup = new Adw.PreferencesGroup({
             title: _('Health Check'),
             description: _('Verify the microphone, STT model, and AI ' +
@@ -324,193 +341,59 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
             icon_name: 'starred-symbolic',
         });
 
-        // ── Backend selection ──
+        // The core currently ships a single AI backend: a local
+        // candle-based llama loader. 'ai-backend' is a string so
+        // future backends can slot in, but from the UI it's a
+        // simple on/off — 'llama' when enabled, 'none' when not.
         const backendGroup = new Adw.PreferencesGroup({
             title: _('AI Backend'),
-            description: _('Clean up raw speech recognition output with AI.'),
+            description: _('Clean up raw speech recognition output with a ' +
+                'local GGUF model. Runs entirely offline via candle.'),
         });
         page.add(backendGroup);
 
         const enabledRow = new Adw.SwitchRow({
             title: _('Enable AI Cleanup'),
-            subtitle: _('Send STT output through AI for cleanup before typing.'),
+            subtitle: _('Send STT output through the local model before typing.'),
+            active: settings.get_string('ai-backend') === 'llama',
         });
-        settings.bind('ai-enabled', enabledRow, 'active',
-            Gio.SettingsBindFlags.DEFAULT);
-        backendGroup.add(enabledRow);
-
-        const backendRow = new Adw.ComboRow({
-            title: _('Backend'),
-            model: Gtk.StringList.new(['Anthropic (Cloud)', 'Ollama (Local)', 'OpenRouter (Cloud)']),
-        });
-        const currentBackend = settings.get_string('ai-backend');
-        backendRow.selected = currentBackend === 'ollama' ? 1 : currentBackend === 'openrouter' ? 2 : 0;
-        backendRow.connect('notify::selected', () => {
-            const backends = ['anthropic', 'ollama', 'openrouter'];
-            settings.set_string('ai-backend', backends[backendRow.selected]);
+        enabledRow.connect('notify::active', () => {
+            settings.set_string('ai-backend',
+                enabledRow.active ? 'llama' : 'none');
         });
         settings.connect('changed::ai-backend', () => {
-            const val = settings.get_string('ai-backend');
-            backendRow.selected = val === 'ollama' ? 1 : val === 'openrouter' ? 2 : 0;
+            const active = settings.get_string('ai-backend') === 'llama';
+            if (enabledRow.active !== active) enabledRow.active = active;
         });
-        backendGroup.add(backendRow);
+        backendGroup.add(enabledRow);
 
-        // ── Anthropic settings ──
-        const anthropicGroup = new Adw.PreferencesGroup({
-            title: _('Anthropic Claude'),
-            description: _('Cloud-based cleanup via the Anthropic API.'),
+        const modelGroup = new Adw.PreferencesGroup({
+            title: _('Local Model'),
+            description: _('GGUF weights the llama backend loads on start.'),
         });
-        page.add(anthropicGroup);
+        page.add(modelGroup);
 
-        const apiKeyRow = new Adw.PasswordEntryRow({
-            title: _('API Key'),
+        const modelPathRow = new Adw.EntryRow({
+            title: _('Model Path'),
         });
-        settings.bind('anthropic-api-key', apiKeyRow, 'text',
+        settings.bind('ai-model', modelPathRow, 'text',
             Gio.SettingsBindFlags.DEFAULT);
-        anthropicGroup.add(apiKeyRow);
-
-        const anthropicModelRow = new Adw.EntryRow({
-            title: _('Model'),
-        });
-        settings.bind('anthropic-model', anthropicModelRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        anthropicGroup.add(anthropicModelRow);
-
-        const proxyUrlRow = new Adw.EntryRow({
-            title: _('Proxy URL'),
-        });
-        settings.bind('proxy-url', proxyUrlRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        anthropicGroup.add(proxyUrlRow);
-
-        const proxyCaCertRow = new Adw.EntryRow({
-            title: _('Proxy CA Certificate'),
-        });
-        settings.bind('proxy-ca-cert', proxyCaCertRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-
-        const proxyCaBrowseButton = new Gtk.Button({
+        const modelBrowseButton = new Gtk.Button({
             icon_name: 'document-open-symbolic',
             valign: Gtk.Align.CENTER,
-            tooltip_text: _('Browse for CA certificate file'),
+            tooltip_text: _('Browse for GGUF model file'),
         });
-        proxyCaBrowseButton.connect('clicked', () => {
-            this._browseFile(proxyCaCertRow, settings, 'proxy-ca-cert');
+        modelBrowseButton.connect('clicked', () => {
+            this._browseFile(modelPathRow, settings, 'ai-model');
         });
-        proxyCaCertRow.add_suffix(proxyCaBrowseButton);
-        anthropicGroup.add(proxyCaCertRow);
+        modelPathRow.add_suffix(modelBrowseButton);
+        modelGroup.add(modelPathRow);
 
-        // ── Ollama settings ──
-        const ollamaGroup = new Adw.PreferencesGroup({
-            title: _('Ollama'),
-            description: _('Local cleanup via an Ollama server. No API key needed.'),
-        });
-        page.add(ollamaGroup);
-
-        const ollamaUrlRow = new Adw.EntryRow({
-            title: _('Server URL'),
-        });
-        settings.bind('ollama-url', ollamaUrlRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        ollamaGroup.add(ollamaUrlRow);
-
-        const ollamaModelRow = new Adw.EntryRow({
-            title: _('Model'),
-        });
-        settings.bind('ollama-model', ollamaModelRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        ollamaGroup.add(ollamaModelRow);
-
-        const ollamaHint = new Adw.ActionRow({
-            title: _('Pull a model first: ollama pull qwen2.5:3b'),
+        const modelHint = new Adw.ActionRow({
+            title: _('Leave empty to auto-detect from ~/.cache/speakeasy'),
             css_classes: ['dim-label'],
         });
-        ollamaGroup.add(ollamaHint);
-
-        // ── OpenRouter settings ──
-        const openrouterGroup = new Adw.PreferencesGroup({
-            title: _('OpenRouter'),
-            description: _('Cloud-based cleanup via OpenRouter API (OpenAI-compatible).'),
-        });
-        page.add(openrouterGroup);
-
-        const openrouterApiKeyRow = new Adw.PasswordEntryRow({
-            title: _('API Key'),
-        });
-        settings.bind('openrouter-api-key', openrouterApiKeyRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        openrouterGroup.add(openrouterApiKeyRow);
-
-        const openrouterUrlRow = new Adw.EntryRow({
-            title: _('API URL'),
-        });
-        settings.bind('openrouter-url', openrouterUrlRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        openrouterGroup.add(openrouterUrlRow);
-
-        const openrouterModelRow = new Adw.EntryRow({
-            title: _('Model'),
-        });
-        settings.bind('openrouter-model', openrouterModelRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-        openrouterGroup.add(openrouterModelRow);
-
-        const openrouterHint = new Adw.ActionRow({
-            title: _('Default: anthropic/claude-haiku-4-5-20251001'),
-            css_classes: ['dim-label'],
-        });
-        openrouterGroup.add(openrouterHint);
-
-        // ── Robustness ──
-        // Bounds the time and request size for AI calls so a slow API
-        // or a long dictation session can't hang the stop-recording
-        // path. Both apply to Anthropic, Ollama, and OpenRouter.
-        const robustGroup = new Adw.PreferencesGroup({
-            title: _('Robustness'),
-            description: _('Bound how long an AI request can hang and how ' +
-                'large the conversation history can grow. These caps prevent ' +
-                'long sessions from freezing the compositor.'),
-        });
-        page.add(robustGroup);
-
-        const timeoutRow = new Adw.SpinRow({
-            title: _('Request Timeout (seconds)'),
-            subtitle: _('Maximum time any single AI HTTP request may take. ' +
-                '0 disables the timeout (not recommended).'),
-            adjustment: new Gtk.Adjustment({
-                lower: 0, upper: 600, step_increment: 5, page_increment: 30,
-                value: settings.get_uint('ai-request-timeout-secs'),
-            }),
-        });
-        settings.bind('ai-request-timeout-secs', timeoutRow, 'value',
-            Gio.SettingsBindFlags.DEFAULT);
-        robustGroup.add(timeoutRow);
-
-        const historyCapRow = new Adw.SpinRow({
-            title: _('History Cap (turn pairs)'),
-            subtitle: _('Maximum conversation turn pairs to keep during a ' +
-                'session. Older chunks are dropped first. 20 ≈ 10 minutes ' +
-                'of recent context. 0 disables the cap.'),
-            adjustment: new Gtk.Adjustment({
-                lower: 0, upper: 200, step_increment: 1, page_increment: 10,
-                value: settings.get_uint('ai-max-history-turns'),
-            }),
-        });
-        settings.bind('ai-max-history-turns', historyCapRow, 'value',
-            Gio.SettingsBindFlags.DEFAULT);
-        robustGroup.add(historyCapRow);
-
-        // Show/hide backend-specific groups
-        const updateVisibility = () => {
-            const backend = settings.get_string('ai-backend');
-            const isOllama = backend === 'ollama';
-            const isOpenRouter = backend === 'openrouter';
-            anthropicGroup.visible = !isOllama && !isOpenRouter;
-            ollamaGroup.visible = isOllama;
-            openrouterGroup.visible = isOpenRouter;
-        };
-        settings.connect('changed::ai-backend', updateVisibility);
-        updateVisibility();
+        modelGroup.add(modelHint);
 
         return page;
     }

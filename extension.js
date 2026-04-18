@@ -160,15 +160,15 @@ export default class SpeakeasyExtension extends Extension {
         });
 
         // Spawn the STT subprocess.  This returns immediately — the
-        // heavy work (GStreamer init, VOSK model load) happens in the
-        // child process.  The recorder fires onReady() when the model
-        // is loaded and it's ready to accept recording commands.
+        // heavy work (whisper model load) happens in the child
+        // process. The recorder fires onReady() when the model is
+        // loaded and it's ready to accept recording commands.
         //
         // If init() returns false, surface the specific failure
-        // reason (missing model, missing gst-vosk plugin, etc.) as
-        // a user-visible notification — the old code just logged a
-        // generic warning and left the icon in the perpetual
-        // "loading" state with no hint of what to do.
+        // reason (missing model, etc.) as a user-visible notification
+        // — the old code just logged a generic warning and left the
+        // icon in the perpetual "loading" state with no hint of what
+        // to do.
         if (!this._recorder.init()) {
             const reason = this._recorder.getLastInitFailureReason?.();
             const msg = reason?.message ??
@@ -386,10 +386,11 @@ export default class SpeakeasyExtension extends Extension {
         }
 
         // Always destroy the recorder immediately to begin subprocess
-        // shutdown.  The STT subprocess is the heaviest resource (~1.5 GB
-        // for the VOSK model) and must not linger — if enable() is called
-        // again quickly (e.g. screen lock/unlock), the new Recorder.init()
-        // will wait for the dying subprocess to exit before respawning.
+        // shutdown.  The STT subprocess is the heaviest resource
+        // (whisper model + candle AI model weights) and must not
+        // linger — if enable() is called again quickly (e.g. screen
+        // lock/unlock), the new Recorder.init() will wait for the
+        // dying subprocess to exit before respawning.
         //
         // Recorder.destroy() resolves any pending stop promise with empty
         // text, which is acceptable since we're disabling.  The snapshot
@@ -1119,8 +1120,8 @@ export default class SpeakeasyExtension extends Extension {
             extensionDir: this.path,
             // Reuse the live recorder's resolved model path so the
             // subprocess doesn't re-run auto-detection. The recorder
-            // has already resolved this from settings or from
-            // ~/.cache/vosk discovery, and that path is the
+            // has already resolved this from settings or from its
+            // whisper-model cache discovery, and that path is the
             // authoritative one for this user's environment.
             modelPath: this._recorder?.getModelPath?.() ?? null,
             onLoading: () => dialog.onLoading(),

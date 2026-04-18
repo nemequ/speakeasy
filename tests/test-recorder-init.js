@@ -95,20 +95,6 @@ test('checkGstElement works for a whisper element', () => {
     assertEqual(res.missing, 'whisper', 'missing element name');
 });
 
-// ─── gstElementForBackend ────────────────────────────────────────────
-
-test('gstElementForBackend maps vosk -> "vosk"', () => {
-    assertEqual(Recorder.gstElementForBackend('vosk'), 'vosk', 'vosk');
-});
-
-test('gstElementForBackend maps whisper -> "whisper"', () => {
-    assertEqual(Recorder.gstElementForBackend('whisper'), 'whisper', 'whisper');
-});
-
-test('gstElementForBackend returns null for unknown backends', () => {
-    assertEqual(Recorder.gstElementForBackend('magic'), null, 'unknown');
-});
-
 // ─── getLastInitFailureReason ────────────────────────────────────────
 
 test('getLastInitFailureReason is null on a fresh instance', () => {

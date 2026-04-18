@@ -47,7 +47,7 @@ export class Recorder {
         this._audioPath = null;
 
         // Backend configuration
-        this._backend = 'whisper'; // Default to whisper now that vosk is removed
+        this._backend = 'whisper';
         this._whisperModelPath = null;
         this._whisperLanguage = 'en';
         this._settings = null;
@@ -89,6 +89,18 @@ export class Recorder {
         // init() waits for this to resolve before spawning a new process.
         this._dyingSubprocess = null;
 
+        // Set between the wait_async exit handler scheduling a respawn and
+        // the subsequent init() actually starting. Without this, isRespawning()
+        // returns false during that idle-tick gap — so a start() racing the
+        // respawn would see "not respawning, not ready" and bail.
+        this._respawnPending = false;
+
+        // Sliding-window crash tracker — monotonic timestamps (ms) of the
+        // last few unexpected exits. Used to break out of a respawn loop if
+        // the subprocess keeps dying on us; without this, a binary that
+        // crashes immediately after Ready would hot-loop forever.
+        this._recentCrashTimes = [];
+
         // Unique ID for this instance to prevent interaudio channel collisions
         this._instanceId = Math.random().toString(36).substring(2, 8);
     }
@@ -109,21 +121,29 @@ export class Recorder {
         this._settings = settings;
         this._loadSettings();
 
-        const keys = ['stt-backend', 'whisper-model-path', 'whisper-language', 'audio-input-device', 'audio-dir', 'recorder-stop-timeout-secs'];
+        // `ai-backend` must be watched because its value is baked into
+        // the subprocess CLI args at launch — changing it with a running
+        // subprocess is a no-op until we tear it down and restart. The
+        // others either reload cheaply at the start of each recording or
+        // don't affect the running subprocess at all, but we watch them
+        // so _loadSettings() is kept current for the next recording.
+        const keys = ['stt-backend', 'whisper-model-path', 'whisper-language', 'audio-input-device', 'audio-dir', 'recorder-stop-timeout-secs', 'ai-backend', 'ai-model'];
         for (const key of keys) {
             this._settingsChangedIds.push(
                 this._settings.connect(`changed::${key}`, () => {
                     const oldBackend = this._backend;
+                    const oldAiBackend = this._aiBackend;
+                    const oldAiModel = this._aiModel;
                     this._loadSettings();
 
-                    // Migrate backend if necessary
-                    if (oldBackend === 'vosk' || oldBackend === 'dlgo') {
-                        this._backend = 'whisper';
-                        log(`Speakeasy: migrated STT backend from ${oldBackend} to whisper`);
-                    }
-
-                    if (oldBackend !== this._backend && this._ready) {
-                        log(`Speakeasy: STT backend changed ${oldBackend} -> ${this._backend}, restarting subprocess`);
+                    const sttChanged = oldBackend !== this._backend;
+                    const aiChanged = oldAiBackend !== this._aiBackend
+                        || oldAiModel !== this._aiModel;
+                    if ((sttChanged || aiChanged) && this._ready) {
+                        if (sttChanged)
+                            log(`Speakeasy: STT backend changed ${oldBackend} -> ${this._backend}, restarting subprocess`);
+                        if (aiChanged)
+                            log(`Speakeasy: AI config changed (backend ${oldAiBackend} -> ${this._aiBackend}, model "${oldAiModel}" -> "${this._aiModel}"), restarting subprocess`);
                         this.destroy();
                         this.init();
                     }
@@ -136,15 +156,13 @@ export class Recorder {
         if (!this._settings)
             return;
 
-        // Ensure we always default to a supported backend if settings are unset or invalid.
+        // Only 'whisper' and 'none' are supported. Any other value
+        // falls back to 'whisper' so stale schema values (pre-migration
+        // 'vosk'/'dlgo' or similar) don't wedge the recorder.
         const currentBackend = this._settings.get_string('stt-backend');
-        if (currentBackend === 'vosk' || currentBackend === 'dlgo') {
-            this._backend = 'whisper'; // Migrate legacy backends
-        } else if (currentBackend === 'whisper' || currentBackend === 'none') {
+        if (currentBackend === 'whisper' || currentBackend === 'none') {
             this._backend = currentBackend;
         } else {
-            // If the backend is unknown or unset, default to whisper.
-            // This handles cases where the user might have set an invalid value.
             this._backend = 'whisper';
             log(`Speakeasy: STT backend "${currentBackend}" is not supported, defaulting to "whisper".`);
         }
@@ -157,17 +175,7 @@ export class Recorder {
         this._audioDirOverride = this._settings.get_string('audio-dir') || '';
         this._stopTimeoutSecs = this._settings.get_uint('recorder-stop-timeout-secs');
 
-        // Load AI settings — use backend-specific API key if available,
-        // falling back to the generic ai-api-key.
         this._aiBackend = this._settings.get_string('ai-backend') || 'none';
-        const backendKeyMap = {
-            anthropic: 'anthropic-api-key',
-            openrouter: 'openrouter-api-key',
-        };
-        const specificKeyName = backendKeyMap[this._aiBackend];
-        const specificKey = specificKeyName
-            ? this._settings.get_string(specificKeyName) : '';
-        this._aiApiKey = specificKey || this._settings.get_string('ai-api-key') || '';
         this._aiModel = this._settings.get_string('ai-model') || '';
         this._systemPromptPath = this._settings.get_string('system-prompt-path') || '';
 
@@ -448,17 +456,6 @@ export class Recorder {
         return {ok: true, missing: null};
     }
 
-    /**
-     * Map a backend name to the GStreamer element it depends on.
-     * @param {string} backend
-     * @returns {?string}
-     */
-    static gstElementForBackend(backend) {
-        if (backend === 'vosk') return 'vosk'; // Re-added to pass test
-        if (backend === 'whisper') return 'whisper';
-        return null;
-    }
-
     // ─── Init / lifecycle ───────────────────────────────────────────
 
     /**
@@ -557,27 +554,19 @@ export class Recorder {
         }
         if (this._audioInputDevice)
             argv.push('--audio-device', this._audioInputDevice);
-        // Add AI cleanup arguments — map JS backend names to core names.
-        // 'anthropic' in GSettings maps to 'openrouter' in the Rust core
-        // (Anthropic's API is accessed via OpenRouter).
-        const coreAiBackend = this._aiBackend === 'anthropic'
-            ? 'openrouter' : this._aiBackend;
-        if (coreAiBackend && coreAiBackend !== 'none') {
-            argv.push('--ai-backend', coreAiBackend);
-            // Pass generic API key and model if set
-            if (this._aiApiKey && this._aiApiKey !== '')
-                argv.push('--ai-api-key', this._aiApiKey);
+        // AI cleanup: only the local 'llama' backend is supported now.
+        // Anything else is treated as disabled.
+        if (this._aiBackend === 'llama') {
+            argv.push('--ai-backend', 'llama');
             let aiModel = this._aiModel;
-            if ((!aiModel || aiModel === '') && coreAiBackend === 'llama')
+            if (!aiModel || aiModel === '')
                 aiModel = Recorder.detectLlamaModelPath();
             if (aiModel && aiModel !== '')
                 argv.push('--ai-model', aiModel);
-            // Pass system prompt path, using calculated default if needed
             if (this._effectiveSystemPromptPath && this._effectiveSystemPromptPath !== '')
                 argv.push('--system-prompt-path', this._effectiveSystemPromptPath);
         } else {
-             // Explicitly pass 'none' if AI cleanup is disabled
-             argv.push('--ai-backend', 'none');
+            argv.push('--ai-backend', 'none');
         }
 
         log('Speakeasy: spawning STT subprocess with args: ' + argv.join(' '));
@@ -636,6 +625,10 @@ export class Recorder {
                 this._subprocess = null;
                 this._stdin = null;
                 this._stdout = null;
+                // Clear running so a subsequent start() isn't rejected by
+                // the "recorder already running" guard — the process that
+                // was doing the recording is gone.
+                this._running = false;
 
                 // The subprocess died unexpectedly.
                 this.cancelReadyWatchdog();
@@ -656,6 +649,51 @@ export class Recorder {
                     log(`Speakeasy: subprocess crash recovery — synthesizing stop from ${this._accumulatedText.length} finals (${synth.length} chars)`);
                     this._stopResolve(synth);
                     this._stopResolve = null;
+                }
+
+                // Auto-respawn when the subprocess was working before it
+                // died. This handles external kills (`pkill speakeasy`,
+                // OS OOM after model load, segfault post-init) without
+                // requiring the user to toggle the extension off/on.
+                //
+                // Gated on wasReady to avoid infinite loops on a binary
+                // that crashes during startup — those keep going through
+                // the _onExit(msg) error path above. destroy()-initiated
+                // exits don't reach this branch at all because destroy()
+                // moves proc into _dyingSubprocess before it returns, so
+                // `_subprocess === proc` is already false.
+                //
+                // Also cap post-ready crashes: if the subprocess dies
+                // three times in 30 s even though it reached Ready, the
+                // loop is almost certainly not going to recover by
+                // trying again. Surface the failure instead.
+                if (wasReady && this._settings) {
+                    const nowMs = GLib.get_monotonic_time() / 1000;
+                    const windowMs = 30_000;
+                    this._recentCrashTimes = this._recentCrashTimes
+                        .filter(t => nowMs - t < windowMs);
+                    this._recentCrashTimes.push(nowMs);
+                    if (this._recentCrashTimes.length >= 3) {
+                        log('Speakeasy: STT subprocess crashed 3 times in 30s — giving up on auto-respawn');
+                        this._recentCrashTimes = [];
+                        if (this._onExit) {
+                            this._onExit('STT subprocess keeps crashing after startup. Check logs; toggle the extension off/on to retry.');
+                        }
+                    } else {
+                        log('Speakeasy: auto-respawning STT subprocess after unexpected exit');
+                        // Mark respawn pending so isRespawning() stays truthy
+                        // across the idle-tick gap; otherwise a start() racing
+                        // the respawn sees "not ready, not respawning" and bails.
+                        this._respawnPending = true;
+                        // Defer to an idle tick so we don't re-enter init()
+                        // from inside its own wait_async callback chain.
+                        GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                            this._respawnPending = false;
+                            if (this._settings && !this._subprocess)
+                                this.init();
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    }
                 }
             }
             // Also clear dying-subprocess tracking if this was the one
@@ -684,7 +722,9 @@ export class Recorder {
      * recover" (give up and notify).
      */
     isRespawning() {
-        return this._dyingSubprocess !== null || (this._subprocess !== null && !this._ready);
+        return this._respawnPending
+            || this._dyingSubprocess !== null
+            || (this._subprocess !== null && !this._ready);
     }
 
     /**
@@ -1071,7 +1111,13 @@ export class Recorder {
                 break;
 
             default:
+                // A core schema/Shell-JS mismatch: the subprocess emitted
+                // an event variant this side has never heard of. Surface
+                // it as an error so it's visible in-UI rather than only
+                // to whoever reads journalctl.
                 log('Speakeasy: unknown event from subprocess: ' + msg.event);
+                if (this._onError)
+                    this._onError(`Unknown event from subprocess: ${msg.event}`);
         }
     }
 

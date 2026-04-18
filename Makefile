@@ -43,7 +43,6 @@ core:
 
 ## Run all tests.
 test:
-	gjs -m tests/test-ai.js
 	gjs -m tests/test-keybinding.js
 	gjs -m tests/test-session-log.js
 	gjs -m tests/test-controller.js
@@ -136,8 +135,6 @@ pack: schemas core
 	  transcriptStore.js \
 	  fileTranscribe.js \
 	  gtk-app.js \
-	  ai.js \
-	  ollama.js \
 	  output.js \
 	  utils.js \
 	  speakeasy \

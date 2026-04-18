@@ -140,39 +140,11 @@
          AI cleanup
          ============================================================ -->
 
-    <!-- AI cleanup toggle -->
-    <key name="ai-enabled" type="b">
-      <default>true</default>
-      <summary>Enable AI text cleanup</summary>
-      <description>
-        When enabled, raw STT output is sent through an AI model
-        for cleanup before being typed.
-      </description>
-    </key>
-
-    <!-- AI API key (generic, used by backends like OpenRouter, Anthropic) -->
-    <key name="ai-api-key" type="s">
-      <default>''</default>
-      <summary>AI API Key</summary>
-      <description>
-        API key for the selected AI backend (e.g., OpenRouter, Anthropic).
-        This is a generic key; specific backends may use it.
-      </description>
-    </key>
-
-    <!-- AI model (generic, used by backends like Ollama, OpenRouter, Anthropic) -->
-    <key name="ai-model" type="s">
-      <default>''</default>
-      <summary>AI Model</summary>
-      <description>
-        The AI model to use for text cleanup (e.g., 'qwen2.5:3b', 'claude-haiku-4-5').
-        This is a generic model identifier; the specific backend interprets it.
-      </description>
-    </key>
-
-    <!-- AI backend: 'llama' (local GGUF via candle) or 'none' (skip cleanup) -->
+    <!-- AI cleanup backend: 'llama' (local GGUF via candle) or 'none' (skip cleanup).
+         Cloud backends (Anthropic, Ollama, OpenRouter) were removed; the core now
+         ships only the local candle-based llama path. -->
     <key name="ai-backend" type="s">
-      <default>'llama'</default>
+      <default>'none'</default>
       <summary>AI cleanup backend</summary>
       <description>
         Which AI backend to use for text cleanup.
@@ -181,116 +153,15 @@
       </description>
     </key>
 
-    <!-- Anthropic API key (stored in GSettings; consider using Secret Service later) -->
-    <key name="anthropic-api-key" type="s">
+    <!-- Path to the local GGUF model used by the 'llama' backend.
+         Empty = auto-detect from ~/.cache/speakeasy. -->
+    <key name="ai-model" type="s">
       <default>''</default>
-      <summary>Anthropic API key</summary>
-      <description>API key for the Anthropic Claude API.</description>
-    </key>
-
-    <!-- HTTP proxy URL for API requests (e.g. http://localhost:8080) -->
-    <key name="proxy-url" type="s">
-      <default>''</default>
-      <summary>HTTP proxy URL</summary>
+      <summary>AI model file</summary>
       <description>
-        HTTP proxy URL for Anthropic API requests (e.g. http://localhost:8080).
-        Leave empty to connect directly.
-      </description>
-    </key>
-
-    <!-- CA certificate PEM file for proxy TLS interception -->
-    <key name="proxy-ca-cert" type="s">
-      <default>''</default>
-      <summary>Proxy CA certificate path</summary>
-      <description>
-        Path to a PEM file containing the CA certificate for the proxy.
-        Required when using a TLS-intercepting proxy.
-        Leave empty when not using a proxy.
-      </description>
-    </key>
-
-    <!-- Anthropic model ID -->
-    <key name="anthropic-model" type="s">
-      <default>'claude-haiku-4-5'</default>
-      <summary>Anthropic model</summary>
-      <description>Model ID for the Anthropic API.</description>
-    </key>
-
-    <!-- Ollama server URL -->
-    <key name="ollama-url" type="s">
-      <default>'http://localhost:11434'</default>
-      <summary>Ollama server URL</summary>
-      <description>
-        Base URL for the Ollama server.
-        Default: http://localhost:11434
-      </description>
-    </key>
-
-    <!-- Ollama model name -->
-    <key name="ollama-model" type="s">
-      <default>'qwen2.5:3b'</default>
-      <summary>Ollama model</summary>
-      <description>
-        Model name for Ollama (e.g. 'qwen2.5:3b', 'llama3.2:3b',
-        'qwen2.5:7b'). Must be pulled first with 'ollama pull'.
-      </description>
-    </key>
-
-    <!-- OpenRouter API key -->
-    <key name="openrouter-api-key" type="s">
-      <default>''</default>
-      <summary>OpenRouter API key</summary>
-      <description>API key for the OpenRouter service.</description>
-    </key>
-
-    <!-- OpenRouter model ID -->
-    <key name="openrouter-model" type="s">
-      <default>'anthropic/claude-haiku-4-5-20251001'</default>
-      <summary>OpenRouter model</summary>
-      <description>Model ID to use for OpenRouter requests (e.g., anthropic/claude-haiku-4-5-20251001).</description>
-    </key>
-
-    <!-- OpenRouter API URL -->
-    <key name="openrouter-url" type="s">
-      <default>'https://openrouter.ai/api/v1'</default>
-      <summary>OpenRouter API URL</summary>
-      <description>Base URL for the OpenRouter API.</description>
-    </key>
-
-    <!-- AI request timeout. Bounds how long any single Anthropic /
-         Ollama HTTP request can hang before being aborted. Without
-         this, a slow API can freeze the compositor for the duration
-         of the call (we await the request synchronously from the
-         stop-recording path). -->
-    <key name="ai-request-timeout-secs" type="u">
-      <default>60</default>
-      <summary>AI request timeout (seconds)</summary>
-      <description>
-        Maximum time in seconds any single AI HTTP request may take
-        before being aborted. Applied to both intermediate cache-warm
-        requests during recording and the final cleanup request.
-        0 disables the timeout (NOT recommended — a hung request will
-        block the recording stop path indefinitely). Default: 60.
-      </description>
-    </key>
-
-    <!-- Maximum number of conversation turn pairs to keep in the AI
-         session history. Caps the request body size for long
-         dictation sessions. The framing pair is always preserved;
-         oldest chunk pairs are dropped first when the limit is hit.
-         Each pair is one user turn (a chunk of dictated text) plus
-         the assistant placeholder. With the default 30s flush
-         interval, 20 pairs covers ~10 minutes of recent context. -->
-    <key name="ai-max-history-turns" type="u">
-      <default>20</default>
-      <summary>AI conversation history cap (turn pairs)</summary>
-      <description>
-        Maximum number of user/assistant turn pairs to keep in the AI
-        conversation history during a dictation session. Long sessions
-        previously grew unbounded, producing huge request bodies that
-        could hang on serialization or upload. The framing pair is
-        always preserved; oldest chunk pairs are dropped first when
-        the limit is exceeded. 0 disables the cap. Default: 20.
+        Path to a local GGUF model file used by the 'llama' backend
+        (e.g. qwen2.5-0.5b-instruct-q4_k_m.gguf). Leave empty to
+        auto-detect from ~/.cache/speakeasy.
       </description>
     </key>
 
