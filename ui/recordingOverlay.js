@@ -165,27 +165,6 @@ class RecordingOverlay extends St.BoxLayout {
         this._waveform = new WaveformDisplay();
         this._headerBox.add_child(this._waveform);
 
-        // Paste button — hidden until the extension calls
-        // showPasteButton(). Marked non-focusable so clicking it
-        // doesn't steal keyboard focus from whatever the user was
-        // typing into — paste would otherwise land in the overlay
-        // itself.
-        this._pasteButton = new St.Button({
-            style_class: 'speakeasy-overlay-paste-button',
-            child: new St.Icon({
-                icon_name: 'edit-paste-symbolic',
-                icon_size: 16,
-            }),
-            y_align: Clutter.ActorAlign.CENTER,
-            visible: false,
-            can_focus: false,
-        });
-        this._pasteButton.connect('clicked', () => {
-            if (this._onPaste)
-                this._onPaste();
-        });
-        this._headerBox.add_child(this._pasteButton);
-
         this._cancelButton = new St.Button({
             style_class: 'speakeasy-overlay-cancel-button',
             child: new St.Icon({
@@ -282,57 +261,6 @@ class RecordingOverlay extends St.BoxLayout {
         this._onCancel = callback;
     }
 
-    /**
-     * Set a callback for when the paste button is clicked. The
-     * callback receives no arguments — the extension is expected
-     * to pull the current text via getCurrentText() and push it to
-     * the output layer (clipboard + Shift+Insert).
-     * @param {function} callback
-     */
-    onPaste(callback) {
-        this._onPaste = callback;
-    }
-
-    /**
-     * Show the Paste button. One-shot semantics are the caller's
-     * responsibility: the overlay just shows/hides it. After a
-     * successful paste the caller typically hides it and closes
-     * the overlay so a second click can't double-paste.
-     */
-    showPasteButton() {
-        this._pasteButton?.show();
-    }
-
-    hidePasteButton() {
-        this._pasteButton?.hide();
-    }
-
-    /**
-     * Concatenate the displayed text in reading order: raw STT
-     * finals first (if any), then cleaned-streaming text (if any),
-     * then the tail partial (usually empty by the time we're
-     * showing a Paste button). Returns an empty string if there's
-     * nothing displayed.
-     */
-    getCurrentText() {
-        if (this._cleanedLabel && this._cleanedLabel.text)
-            return this._cleanedLabel.text;
-        const parts = [];
-        for (const child of this._transcriptBox.get_children()) {
-            if (child === this._partialLabel || child === this._cleanedLabel)
-                continue;
-            const t = child.text;
-            if (t) parts.push(t);
-        }
-        if (this._partialLabel && this._partialLabel.text)
-            parts.push(this._partialLabel.text);
-        return parts.join(' ').trim();
-    }
-
-    hasText() {
-        return this.getCurrentText().length > 0;
-    }
-
     // ── Public API ──
     // Note: we use open/close instead of show/hide to avoid
     // shadowing Clutter.Actor.show() / hide().
@@ -356,7 +284,6 @@ class RecordingOverlay extends St.BoxLayout {
     close() {
         this._mode = 'idle';
         this._spinner.stop();
-        this.hidePasteButton();
         super.hide();
     }
 
@@ -516,13 +443,9 @@ class RecordingOverlay extends St.BoxLayout {
                 this._scrollView.show();
                 this._statusBox.hide();
                 this._spinner.stop();
-                this.hidePasteButton();
                 break;
 
             case 'processing':
-                // Keep the header visible during processing so the
-                // paste button (added by the extension on cleaned-text
-                // delivery) is reachable without a second popup.
                 this._headerBox.show();
                 this._scrollView.show();
                 this._statusBox.show();
