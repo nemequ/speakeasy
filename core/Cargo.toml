@@ -16,6 +16,19 @@ ratatui = "0.26"
 crossterm = { version = "0.27", features = ["event-stream"] }
 hound = "3.5"
 libc = "0.2"
+# On-disk audio retention: write .opus files during every recording so
+# that a crashed / interrupted session leaves a recoverable artifact
+# behind. opusic-c = high-level libopus bindings (bundles libopus via
+# its `bundled` default feature, so there's no host opus-devel
+# requirement); ogg = the Ogg container.
+#
+# We originally tried the older `opus` crate; its transitive
+# `audiopus_sys` crate has a hardcoded `{prefix}/lib` install path
+# that breaks on Fedora-family distros where cmake installs to
+# `lib64/`. opusic-c uses its own `opusic-sys` which does the right
+# thing, so we don't have to vendor a patched audiopus_sys.
+opusic-c = "1.5"
+ogg = "0.9"
 # Local AI cleanup: candle is pure Rust (no libclang/bindgen), reads
 # the same GGUF files as llama.cpp via quantized_qwen2::ModelWeights.
 # tokenizers is set with default-features=false to avoid the `onig` C

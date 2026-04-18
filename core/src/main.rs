@@ -2,6 +2,7 @@ mod tui;
 mod ai;
 mod ai_local;
 mod ai_worker;
+mod audio_writer;
 
 use anyhow::{Context, Result};
 use hound::{WavReader, WavSpec, WavWriter, SampleFormat};
@@ -98,6 +99,10 @@ pub enum Event {
 #[derive(Deserialize, Debug)]
 pub struct Command {
     pub cmd: String,
+    // Path for start_file / delete_audio. Optional so legacy callers
+    // that send bare {"cmd":"start"} keep working.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -420,6 +425,13 @@ async fn main() -> Result<()> {
     let audio_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
     let mono_48k_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
     let last_snapshot_len = Arc::new(Mutex::new(0usize));
+    // On-disk audio retention. The audio callback pushes 16 kHz mono
+    // samples into this writer (via try_lock so a main-thread stop
+    // transition can't stall the RT thread); start_file opens a new
+    // one, stop / stop_file closes it. delete_audio deletes the file.
+    let audio_writer: Arc<Mutex<Option<audio_writer::OpusAudioWriter>>> =
+        Arc::new(Mutex::new(None));
+    let mut last_audio_path: Option<std::path::PathBuf> = None;
 
     // Initialize Audio
     let host = cpal::default_host();
@@ -443,6 +455,7 @@ async fn main() -> Result<()> {
     let recording_cb = Arc::clone(&recording);
     let buffer_cb = Arc::clone(&audio_buffer);
     let mono_cb = Arc::clone(&mono_48k_buffer);
+    let writer_cb = Arc::clone(&audio_writer);
     let channels = config.channels as usize;
     let event_tx_audio = event_tx.clone();
 
@@ -455,6 +468,10 @@ async fn main() -> Result<()> {
 
             let mut mono_48k = mono_cb.lock().unwrap();
             let mut final_buf = buffer_cb.lock().unwrap();
+            // Collect the newly-produced 16 kHz samples so we can hand
+            // them to the on-disk writer once per callback without
+            // holding its lock through the encode loop.
+            let mut fresh_samples: Vec<f32> = Vec::new();
 
             // 1. Downmix to Mono
             for frame in data.chunks(channels) {
@@ -480,6 +497,7 @@ async fn main() -> Result<()> {
                 for i in (0..FRAME_SIZE).step_by(3) {
                     let avg = (out_frame[i] + out_frame[i+1] + out_frame[i+2]) / 3.0;
                     final_buf.push(avg);
+                    fresh_samples.push(avg);
                     sum_sq += (avg * avg) as f64;
                     let a = avg.abs();
                     if a > peak_lin { peak_lin = a; }
@@ -496,6 +514,23 @@ async fn main() -> Result<()> {
 
                 // Consume processed samples
                 mono_48k.drain(..FRAME_SIZE);
+            }
+
+            // Release the heavy locks before touching the writer — the
+            // writer's push() only sends to a channel but try_lock still
+            // costs us a Mutex contention hop on every callback.
+            drop(final_buf);
+            drop(mono_48k);
+            if !fresh_samples.is_empty() {
+                if let Ok(guard) = writer_cb.try_lock() {
+                    if let Some(w) = guard.as_ref() {
+                        w.push(&fresh_samples);
+                    }
+                }
+                // If try_lock fails, the main loop is mid-start/stop and
+                // will own the next frame window anyway. Dropping one
+                // callback's worth of audio from the retention file is
+                // acceptable; the in-memory audio_buffer still has it.
             }
         },
         |err| eprintln!("Audio stream error: {}", err),
@@ -568,6 +603,39 @@ async fn main() -> Result<()> {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd.cmd.as_str() {
                     "start" | "start_file" => {
+                        let is_start_file = cmd.cmd == "start_file";
+
+                        // Writer management must come BEFORE we flip the
+                        // recording flag — only "start_file" touches the
+                        // writer. Doing this on plain "start" would close
+                        // a writer that a preceding "start_file" just
+                        // opened (the JS recorder sends them back-to-back),
+                        // leaving the retention file with only its two
+                        // Ogg header pages and zero audio payload.
+                        if is_start_file {
+                            if let Some(old) = audio_writer.lock().unwrap().take() {
+                                tokio::task::spawn_blocking(move || old.close());
+                            }
+                            if let Some(path_str) = cmd.path.as_ref() {
+                                let path = std::path::PathBuf::from(path_str);
+                                match audio_writer::OpusAudioWriter::new(path.clone()) {
+                                    Ok(w) => {
+                                        *audio_writer.lock().unwrap() = Some(w);
+                                        last_audio_path = Some(path);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Speakeasy: audio retention disabled for this recording ({}): {}",
+                                            path.display(), e
+                                        );
+                                        last_audio_path = None;
+                                    }
+                                }
+                            } else {
+                                last_audio_path = None;
+                            }
+                        }
+
                         recording.store(true, Ordering::SeqCst);
                         audio_buffer.lock().unwrap().clear();
                         mono_48k_buffer.lock().unwrap().clear();
@@ -602,6 +670,13 @@ async fn main() -> Result<()> {
                         let buf: Vec<f32> =
                             std::mem::take(&mut *audio_buffer.lock().unwrap());
                         *last_snapshot_len.lock().unwrap() = 0;
+
+                        // Close the on-disk writer on a blocking pool so
+                        // the async runtime stays responsive while the
+                        // writer's worker thread flushes its final page.
+                        if let Some(w) = audio_writer.lock().unwrap().take() {
+                            tokio::task::spawn_blocking(move || w.close());
+                        }
 
                         // WAV saving logic — only captures the tail since
                         // prior chunks have already been committed. Good
@@ -638,7 +713,44 @@ async fn main() -> Result<()> {
                             let _ = event_tx.send(Event::Stopped { text: String::new() });
                         }
                     }
-                    "quit" => break,
+                    "delete_audio" => {
+                        // Make sure the writer (if still open) is closed
+                        // so its worker has released the file handle
+                        // before we unlink. Close on a blocking task to
+                        // avoid stalling the runtime, then delete.
+                        let writer_opt = audio_writer.lock().unwrap().take();
+                        let path = cmd.path
+                            .as_ref()
+                            .map(std::path::PathBuf::from)
+                            .or_else(|| last_audio_path.clone());
+                        last_audio_path = None;
+                        if let Some(path) = path {
+                            tokio::task::spawn_blocking(move || {
+                                if let Some(w) = writer_opt {
+                                    w.close();
+                                }
+                                if let Err(e) = std::fs::remove_file(&path) {
+                                    if e.kind() != std::io::ErrorKind::NotFound {
+                                        eprintln!(
+                                            "Speakeasy: delete_audio failed for {}: {}",
+                                            path.display(), e
+                                        );
+                                    }
+                                }
+                            });
+                        } else if let Some(w) = writer_opt {
+                            tokio::task::spawn_blocking(move || w.close());
+                        }
+                    }
+                    "quit" => {
+                        // Make sure any in-flight retention file is flushed
+                        // before the process exits; otherwise a long
+                        // recording could lose its tail on an abrupt quit.
+                        if let Some(w) = audio_writer.lock().unwrap().take() {
+                            w.close();
+                        }
+                        break;
+                    }
                     _ => {}
                 }
             }

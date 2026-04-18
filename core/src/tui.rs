@@ -141,11 +141,11 @@ pub async fn run_tui(
                         if s.recording {
                             s.recording = false;
                             s.status = "Transcribing...".to_string();
-                            let _ = cmd_tx.send(Command { cmd: "stop".to_string() });
+                            let _ = cmd_tx.send(Command { cmd: "stop".to_string(), path: None });
                         } else {
                             s.recording = true;
                             s.status = "Recording...".to_string();
-                            let _ = cmd_tx.send(Command { cmd: "start".to_string() });
+                            let _ = cmd_tx.send(Command { cmd: "start".to_string(), path: None });
                         }
                     }
                     _ => {}
