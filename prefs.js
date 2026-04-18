@@ -282,67 +282,6 @@ export default class SpeakeasyPreferences extends ExtensionPreferences {
 
         audioGroup.add(audioDeviceRow);
 
-        // ── Backend group ──
-        const backendGroup = new Adw.PreferencesGroup({
-            title: _('STT Backend'),
-            description: _('Choose the speech recognition engine.'),
-        });
-        page.add(backendGroup);
-
-        const backendRow = new Adw.ComboRow({
-            title: _('Backend'),
-            subtitle: _('dlgo is recommended for best performance'),
-            model: Gtk.StringList.new(['vosk', 'whisper', 'dlgo']),
-        });
-        // Sync combo to setting
-        const syncBackend = () => {
-            const val = settings.get_string('stt-backend');
-            if (val === 'whisper')
-                backendRow.selected = 1;
-            else if (val === 'dlgo')
-                backendRow.selected = 2;
-            else
-                backendRow.selected = 0;
-        };
-        syncBackend();
-
-        backendRow.connect('notify::selected', () => {
-            const backends = ['vosk', 'whisper', 'dlgo'];
-            settings.set_string('stt-backend', backends[backendRow.selected]);
-        });
-        settings.connect('changed::stt-backend', syncBackend);
-        backendGroup.add(backendRow);
-
-        // ── VOSK group ──
-        const voskGroup = new Adw.PreferencesGroup({
-            title: _('VOSK'),
-            description: _('Settings for the VOSK speech recognition backend.'),
-        });
-        page.add(voskGroup);
-
-        const voskPathRow = new Adw.EntryRow({
-            title: _('Model Path'),
-        });
-        settings.bind('vosk-model-path', voskPathRow, 'text',
-            Gio.SettingsBindFlags.DEFAULT);
-
-        const voskBrowseButton = new Gtk.Button({
-            icon_name: 'folder-open-symbolic',
-            valign: Gtk.Align.CENTER,
-            tooltip_text: _('Browse for VOSK model directory'),
-        });
-        voskBrowseButton.connect('clicked', () => {
-            this._browseFolder(voskPathRow, settings, 'vosk-model-path');
-        });
-        voskPathRow.add_suffix(voskBrowseButton);
-        voskGroup.add(voskPathRow);
-
-        const voskHint = new Adw.ActionRow({
-            title: _('Leave empty to auto-detect from ~/.cache/vosk'),
-            css_classes: ['dim-label'],
-        });
-        voskGroup.add(voskHint);
-
         // ── Whisper group ──
         const whisperGroup = new Adw.PreferencesGroup({
             title: _('Whisper'),
