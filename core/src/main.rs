@@ -51,6 +51,13 @@ struct Args {
     #[arg(long, default_value_t = 1.5)]
     partial_interval: f64,
 
+    /// Max active-buffer length before a commit-decode fires, in seconds.
+    /// Each commit snips off this much audio, decodes it once, and appends the
+    /// text to a monotonic committed prefix — keeping post-stop latency bounded
+    /// to roughly one commit-window regardless of total recording length.
+    #[arg(long, default_value_t = 15.0)]
+    commit_window_secs: f64,
+
     /// AI backend for text cleanup: 'llama' (local GGUF via candle) or 'none'.
     /// When 'llama', set --ai-model to the GGUF file path.
     #[arg(long, default_value = "none")]
@@ -95,14 +102,74 @@ pub struct Command {
 
 #[derive(Debug)]
 enum TranscribeCmd {
-    Transcribe(Vec<f32>),
-    TranscribeAndStop(Vec<f32>),
+    // Preview decode of the current tail. Stale Partials queued behind a
+    // newer command are dropped (see coalesce_partials).
+    Partial(Vec<f32>),
+    // A chunk the main loop has sliced off the front of the active buffer
+    // and considers final. Decoded once and appended to committed_text.
+    Commit(Vec<f32>),
+    // Last tail after stop. Triggers the final Stopped event.
+    TranscribeFinal(Vec<f32>),
 }
 
 #[derive(Debug)]
 enum TranscribeResult {
     Partial(String),
+    Committed(String),
     Stopped(String),
+}
+
+// Drop any Partial that's made stale by a later Commit/Final in the same
+// drain window, and keep at most one trailing Partial. Audio in a stale
+// Partial is a superset of audio in the following Commit, so decoding it
+// would redundantly process the committed chunk.
+fn coalesce_partials(pending: Vec<TranscribeCmd>) -> Vec<TranscribeCmd> {
+    let mut out: Vec<TranscribeCmd> = Vec::with_capacity(pending.len());
+    let mut trailing_partial: Option<Vec<f32>> = None;
+    for cmd in pending {
+        match cmd {
+            TranscribeCmd::Partial(audio) => {
+                trailing_partial = Some(audio);
+            }
+            other => {
+                trailing_partial = None;
+                out.push(other);
+            }
+        }
+    }
+    if let Some(audio) = trailing_partial {
+        out.push(TranscribeCmd::Partial(audio));
+    }
+    out
+}
+
+// Locate a cut point inside `audio` at-or-before `target` that lands in the
+// quietest 200ms window within the last `search_back` samples. Returns the
+// sample index at the end of that quiet window, so the committed chunk ends
+// in silence and the tail starts fresh.
+fn find_silent_cut(audio: &[f32], target: usize, search_back: usize, window: usize) -> usize {
+    let target = target.min(audio.len());
+    if target < window {
+        return target;
+    }
+    let start = target.saturating_sub(search_back);
+    if target - start < window {
+        return target;
+    }
+    let hop = (window / 4).max(1);
+    let mut best_rms = f32::INFINITY;
+    let mut best_cut = target;
+    let mut pos = start;
+    while pos + window <= target {
+        let slice = &audio[pos..pos + window];
+        let rms: f32 = (slice.iter().map(|s| s * s).sum::<f32>() / window as f32).sqrt();
+        if rms < best_rms {
+            best_rms = rms;
+            best_cut = pos + window;
+        }
+        pos += hop;
+    }
+    best_cut
 }
 
 fn start_transcription_thread(
@@ -141,36 +208,38 @@ fn start_transcription_thread(
         };
 
         loop {
-            let cmd = match cmd_rx.recv() {
+            let first = match cmd_rx.recv() {
                 Ok(c) => c,
                 Err(_) => break,
             };
+            let mut pending = vec![first];
+            while let Ok(next) = cmd_rx.try_recv() {
+                pending.push(next);
+            }
 
-            // For partial transcriptions, drain the queue and only process the
-            // most recent snapshot — older ones are strict subsets of newer ones
-            // since we always send the full buffer from the start.
-            let cmd = {
-                let mut latest = cmd;
-                while let Ok(newer) = cmd_rx.try_recv() {
-                    latest = newer;
-                }
-                latest
-            };
-
-            match cmd {
-                TranscribeCmd::Transcribe(audio) => {
-                    let text = match model.transcribe(&audio) {
-                        Ok(t) => t,
-                        Err(e) => format!("Error: {}", e),
-                    };
-                    let _ = result_tx.send(TranscribeResult::Partial(text));
-                }
-                TranscribeCmd::TranscribeAndStop(audio) => {
-                    let text = match model.transcribe(&audio) {
-                        Ok(t) => t,
-                        Err(e) => format!("Error: {}", e),
-                    };
-                    let _ = result_tx.send(TranscribeResult::Stopped(text));
+            for cmd in coalesce_partials(pending) {
+                match cmd {
+                    TranscribeCmd::Partial(audio) => {
+                        let text = match model.transcribe(&audio) {
+                            Ok(t) => t,
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        let _ = result_tx.send(TranscribeResult::Partial(text));
+                    }
+                    TranscribeCmd::Commit(audio) => {
+                        let text = match model.transcribe(&audio) {
+                            Ok(t) => t,
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        let _ = result_tx.send(TranscribeResult::Committed(text));
+                    }
+                    TranscribeCmd::TranscribeFinal(audio) => {
+                        let text = match model.transcribe(&audio) {
+                            Ok(t) => t,
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        let _ = result_tx.send(TranscribeResult::Stopped(text));
+                    }
                 }
             }
         }
@@ -472,6 +541,27 @@ async fn main() -> Result<()> {
     let mut is_recording = false;
     let mut partial_timer = interval(Duration::from_secs_f64(partial_interval_secs));
 
+    // Sliding-window commit state: audio captured into `audio_buffer` is
+    // periodically snipped at a silent boundary, decoded, and appended to
+    // `committed_text`. The active buffer only ever holds the current tail,
+    // so both partials and the final stop decode run on bounded audio.
+    let commit_window_samples = (args.commit_window_secs * 16000.0) as usize;
+    let cut_search_samples: usize = 16000 * 3; // look back 3s for a quiet cut point
+    let cut_window_samples: usize = 3200;      // 200ms silence window
+    let mut committed_text = String::new();
+
+    fn combine_text(prefix: &str, tail: &str) -> String {
+        let prefix = prefix.trim_end();
+        let tail = tail.trim_start();
+        if prefix.is_empty() {
+            tail.to_string()
+        } else if tail.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{} {}", prefix, tail)
+        }
+    }
+
     // Command processor
     loop {
         tokio::select! {
@@ -482,6 +572,7 @@ async fn main() -> Result<()> {
                         audio_buffer.lock().unwrap().clear();
                         mono_48k_buffer.lock().unwrap().clear();
                         *last_snapshot_len.lock().unwrap() = 0;
+                        committed_text.clear();
                         is_recording = true;
                         partial_timer.reset();
 
@@ -504,9 +595,18 @@ async fn main() -> Result<()> {
                         // firing on a legitimately-slow long-audio decode.
                         let _ = event_tx.send(Event::Transcribing);
 
-                        let buf = audio_buffer.lock().unwrap().clone();
+                        // Drain the remaining tail atomically — anything the
+                        // audio callback writes after this point is discarded
+                        // (recording flag is already false) but the clear keeps
+                        // state consistent for the next recording.
+                        let buf: Vec<f32> =
+                            std::mem::take(&mut *audio_buffer.lock().unwrap());
+                        *last_snapshot_len.lock().unwrap() = 0;
 
-                        // WAV saving logic
+                        // WAV saving logic — only captures the tail since
+                        // prior chunks have already been committed. Good
+                        // enough for short-utterance debugging; for full
+                        // recordings we need proper on-disk retention.
                         if let Some(wav_path) = args.debug_save_wav.clone() {
                             let spec = WavSpec {
                                 channels: 1,
@@ -522,14 +622,18 @@ async fn main() -> Result<()> {
                             writer.finalize().unwrap();
                         }
 
-                        // Send final transcription to the transcription thread
-                        if let Some(ref cmd_tx) = transcribe_cmd_tx {
-                            if !buf.is_empty() {
-                                let _ = cmd_tx.send(TranscribeCmd::TranscribeAndStop(buf));
-                                // Result arrives via transcribe_result_rx, handled below
-                            } else {
-                                let _ = event_tx.send(Event::Stopped { text: String::new() });
-                            }
+                        // If the tail is empty (user hit stop before any new
+                        // audio since the last commit), we can emit Stopped
+                        // immediately from committed_text alone.
+                        if buf.is_empty() {
+                            let final_text = std::mem::take(&mut committed_text);
+                            let final_text = final_text.trim().to_string();
+                            let _ = event_tx.send(Event::Stopped { text: final_text });
+                        } else if let Some(ref cmd_tx) = transcribe_cmd_tx {
+                            let _ = cmd_tx.send(TranscribeCmd::TranscribeFinal(buf));
+                            // Result arrives via transcribe_result_rx; the
+                            // handler combines it with committed_text and
+                            // emits Stopped.
                         } else {
                             let _ = event_tx.send(Event::Stopped { text: String::new() });
                         }
@@ -542,14 +646,37 @@ async fn main() -> Result<()> {
             Some(result) = transcribe_result_rx.recv() => {
                 match result {
                     TranscribeResult::Partial(text) => {
-                        let _ = event_tx.send(Event::Partial { text });
+                        // Preview = committed prefix + current tail decode.
+                        // committed_text is stable across Partial events, so
+                        // the UI can keep replacing its display without
+                        // flicker.
+                        let combined = combine_text(&committed_text, &text);
+                        let _ = event_tx.send(Event::Partial { text: combined });
                     }
-                    TranscribeResult::Stopped(text) => {
+                    TranscribeResult::Committed(text) => {
+                        // Promote the chunk into the committed prefix and
+                        // emit a Partial so the UI sees the stable portion
+                        // grow. The next tail decode will re-preview
+                        // whatever the user has said since this commit.
+                        let piece = text.trim();
+                        if !piece.is_empty() {
+                            committed_text = combine_text(&committed_text, piece);
+                        }
+                        let _ = event_tx.send(Event::Partial { text: committed_text.clone() });
+                    }
+                    TranscribeResult::Stopped(tail_text) => {
+                        let final_text =
+                            combine_text(&committed_text, &tail_text)
+                                .trim()
+                                .to_string();
+                        committed_text.clear();
+
                         // If AI cleanup is configured, snapshot the raw
                         // text before shipping Stopped so we can feed it
                         // to either the worker (hot path) or the inline
                         // fallback (no worker, e.g. cloud backends if
                         // they ever come back).
+                        let text = final_text;
                         let text_for_ai = if ai_config.is_some() { Some(text.clone()) } else { None };
                         let _ = event_tx.send(Event::Stopped { text });
 
@@ -610,17 +737,37 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            // Periodic partial transcription while recording
+            // Periodic partial transcription while recording.
+            // When the active buffer has grown past commit_window_samples we
+            // snip it at a silent boundary and promote that chunk into the
+            // committed prefix; otherwise we just preview the current tail.
             _ = partial_timer.tick(), if is_recording => {
                 if let Some(ref cmd_tx) = transcribe_cmd_tx {
-                    let current_len = audio_buffer.lock().unwrap().len();
-                    let last_len = *last_snapshot_len.lock().unwrap();
-
-                    // Only transcribe if we have new audio (at least 1s = 16000 samples)
-                    if current_len > last_len + 16000 {
-                        let buf = audio_buffer.lock().unwrap().clone();
-                        *last_snapshot_len.lock().unwrap() = buf.len();
-                        let _ = cmd_tx.send(TranscribeCmd::Transcribe(buf));
+                    let mut buf = audio_buffer.lock().unwrap();
+                    if buf.len() >= commit_window_samples {
+                        let target = commit_window_samples.min(buf.len());
+                        let cut = find_silent_cut(
+                            &buf,
+                            target,
+                            cut_search_samples,
+                            cut_window_samples,
+                        );
+                        // Guard: never commit zero (would spin) and never
+                        // commit past the buffer end.
+                        let cut = cut.clamp(cut_window_samples.min(buf.len()), buf.len());
+                        let committed_chunk: Vec<f32> = buf.drain(..cut).collect();
+                        drop(buf);
+                        *last_snapshot_len.lock().unwrap() = 0;
+                        let _ = cmd_tx.send(TranscribeCmd::Commit(committed_chunk));
+                    } else {
+                        let current_len = buf.len();
+                        let last_len = *last_snapshot_len.lock().unwrap();
+                        if current_len > last_len + 16000 {
+                            let snapshot = buf.clone();
+                            drop(buf);
+                            *last_snapshot_len.lock().unwrap() = current_len;
+                            let _ = cmd_tx.send(TranscribeCmd::Partial(snapshot));
+                        }
                     }
                 }
             }
