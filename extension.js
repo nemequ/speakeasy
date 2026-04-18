@@ -71,18 +71,17 @@ export default class SpeakeasyExtension extends Extension {
         log(`Speakeasy:   overlay created (+${((GLib.get_monotonic_time() - t0) / 1000).toFixed(1)}ms)`);
 
         // Position overlay near bottom center of primary monitor.
-        // Deferred because primaryMonitor may be null during early enable().
+        // Listen for monitor changes for two reasons:
+        //   1. primaryMonitor may be null during early enable(), so
+        //      the first position pass is a no-op — we need the signal
+        //      to fire once monitors exist.
+        //   2. After an external display is unplugged, the overlay's
+        //      last-positioned coordinates may land off-screen on the
+        //      now-missing monitor. Snap back to the primary monitor's
+        //      default spot so it stays visible.
         this._positionOverlay();
-        if (!Main.layoutManager.primaryMonitor) {
-            this._monitorsChangedId = Main.layoutManager.connect(
-                'monitors-changed', () => {
-                    this._positionOverlay();
-                    if (this._monitorsChangedId) {
-                        Main.layoutManager.disconnect(this._monitorsChangedId);
-                        this._monitorsChangedId = 0;
-                    }
-                });
-        }
+        this._monitorsChangedId = Main.layoutManager.connect(
+            'monitors-changed', () => this._positionOverlay());
 
         // Wire overlay cancel button. Meaning depends on controller state:
         //  - RECORDING: discard the in-flight recording (delete audio,
