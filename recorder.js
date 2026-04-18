@@ -788,7 +788,16 @@ export class Recorder {
         log('Speakeasy: stopping recorder');
         this._running = false;
 
-        this._sendCommand({cmd: 'stop_file'});
+        // One stop command, not two. Sending both `stop_file` and
+        // `stop` used to race the two-pass transcription path: the
+        // core treats them identically, so the first stop drained the
+        // audio buffer and kicked off the final whisper decode, and
+        // the second stop then found `buf.is_empty()` and immediately
+        // emitted `Stopped { text: "" }`. That empty result arrived
+        // at the Shell before the real transcription finished,
+        // resolved `recorder.stop()` with `""`, and the controller
+        // fired "No speech detected" even though whisper had been
+        // happily streaming partials the whole time.
         this._sendCommand({cmd: 'stop'});
 
         return new Promise(resolve => {

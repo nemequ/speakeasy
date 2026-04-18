@@ -654,6 +654,15 @@ async fn main() -> Result<()> {
                         }
                     }
                     "stop" | "stop_file" => {
+                        // Ignore double-stops. Without this guard, a
+                        // second stop drains the (already-empty) tail
+                        // buffer, takes `buf.is_empty()` branch below,
+                        // and emits Stopped{text:""} — which overrides
+                        // the real transcription that the first stop
+                        // handed off to the whisper worker.
+                        if !is_recording {
+                            continue;
+                        }
                         recording.store(false, Ordering::SeqCst);
                         is_recording = false;
 

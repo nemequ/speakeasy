@@ -129,8 +129,10 @@ const loop = GLib.MainLoop.new(null, false);
         const stopPromise = r.stop();
         // The watchdog should now be armed.
         assert(r._stopWatchdogId !== 0, 'watchdog armed');
-        // Stop commands should have been queued.
-        assertEqual(r._sentCommands.length, 2, '2 commands sent');
+        // One stop command should have been queued. (The old code
+        // sent a redundant {cmd:'stop_file'} too, which raced the
+        // real transcription and resolved with empty text.)
+        assertEqual(r._sentCommands.length, 1, '1 stop command sent');
 
         // Simulate the subprocess sending the stopped event.
         // We invoke the message handler directly with the parsed
