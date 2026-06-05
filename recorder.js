@@ -553,7 +553,7 @@ export class Recorder {
              argv.push('--backend', 'none');
         }
         if (this._audioInputDevice)
-            argv.push('--audio-device', this._audioInputDevice);
+            argv.push('--input-device', this._audioInputDevice);
         // AI cleanup: only the local 'llama' backend is supported now.
         // Anything else is treated as disabled.
         if (this._aiBackend === 'llama') {
@@ -1117,6 +1117,20 @@ export class Recorder {
                     this.cancelReadyWatchdog();
                 if (this._onError)
                     this._onError(msg.message);
+                break;
+
+            case 'state_change':
+                // Informational FSM transition from the core's keybinding
+                // state machine. The extension drives its own UI state from
+                // partial/stopped/level, so this is a no-op here — handled
+                // explicitly so it doesn't fall through to the error case.
+                break;
+
+            case 'saved':
+                // The core wrote a transcript to disk (live save or orphan
+                // recovery). The extension manages its own transcript history,
+                // so we just acknowledge it rather than treating it as an
+                // unknown event.
                 break;
 
             default:

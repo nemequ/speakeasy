@@ -2,6 +2,18 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+// Portable business-logic modules, landed in the library so both the
+// daemon (main.rs) and external frontends (Swift/GNOME) can share them
+// via the binary/CLI surface or a future FFI layer. These are not yet
+// wired into the daemon protocol — that's a later phase.
+pub mod data_paths;
+pub mod event;
+pub mod file_transcribe;
+pub mod keybinding;
+pub mod model_catalog;
+pub mod session_log;
+pub mod transcript_store;
+
 pub struct WhisperModel {
     context: WhisperContext,
 }

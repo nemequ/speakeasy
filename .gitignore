@@ -12,5 +12,11 @@ __pycache__/
 .vscode/
 .idea/
 
+# Rust build artifacts
+/core/target/
+
+# Symlink to the built core binary (created by `make core`)
+/speakeasy
+
 # Claude Code local state (per-user, not part of the project)
 .claude/

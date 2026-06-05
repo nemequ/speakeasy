@@ -1,4 +1,4 @@
-use crate::{Command, Event};
+use crate::{Event, IncomingCommand};
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event as CrossEvent, KeyCode},
@@ -25,7 +25,7 @@ pub struct TuiState {
 
 pub async fn run_tui(
     mut event_rx: mpsc::UnboundedReceiver<Event>,
-    cmd_tx: mpsc::UnboundedSender<Command>,
+    cmd_tx: mpsc::UnboundedSender<IncomingCommand>,
 ) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -66,24 +66,17 @@ pub async fn run_tui(
                     s.recording = false;
                     s.level = 0.0;
                 }
-                Event::Final { text } => {
-                    s.transcription = text;
-                    s.status = "AI Cleaned".to_string();
-                }
-                Event::Delta { text } => {
-                    // Stream AI-cleanup chunks into the TUI view as
-                    // they arrive so the user sees progress instead
-                    // of a jump from raw STT to cleaned text. The
-                    // first delta in a cleanup pass replaces the
-                    // raw-STT text that Stopped left in the view.
-                    if s.status != "AI Cleaning..." {
-                        s.transcription.clear();
-                        s.status = "AI Cleaning...".to_string();
-                    }
-                    s.transcription.push_str(&text);
-                }
                 Event::Error { message } => {
                     s.status = format!("Error: {}", message);
+                }
+                Event::StateChange { state } => {
+                    // The TUI derives its own status string from the
+                    // Ready/Level/Partial/Stopped events; state_change
+                    // is informational here.
+                    let _ = state;
+                }
+                Event::Saved { .. } => {
+                    // TUI doesn't surface transcript-saved events yet.
                 }
             }
         }
@@ -141,11 +134,11 @@ pub async fn run_tui(
                         if s.recording {
                             s.recording = false;
                             s.status = "Transcribing...".to_string();
-                            let _ = cmd_tx.send(Command { cmd: "stop".to_string(), path: None });
+                            let _ = cmd_tx.send(IncomingCommand { cmd: "stop".to_string(), ..Default::default() });
                         } else {
                             s.recording = true;
                             s.status = "Recording...".to_string();
-                            let _ = cmd_tx.send(Command { cmd: "start".to_string(), path: None });
+                            let _ = cmd_tx.send(IncomingCommand { cmd: "start".to_string(), ..Default::default() });
                         }
                     }
                     _ => {}

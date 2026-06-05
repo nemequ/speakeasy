@@ -29,16 +29,64 @@ libc = "0.2"
 # thing, so we don't have to vendor a patched audiopus_sys.
 opusic-c = "1.5"
 ogg = "0.9"
-# Local AI cleanup: candle is pure Rust (no libclang/bindgen), reads
-# the same GGUF files as llama.cpp via quantized_qwen2::ModelWeights.
-# tokenizers is set with default-features=false to avoid the `onig` C
-# regex backend — we use the fancy-regex pure-Rust fallback instead.
-candle-core = "0.8"
-candle-transformers = "0.8"
-tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
+
+# Phase 1a — data paths + model catalog + on-demand download
+directories = "5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha2 = "0.10"
+futures-util = "0.3"
+
+# Phase 1b — session log / transcript store (ISO-8601 timestamps)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Phase 1c — multi-format audio decode for `transcribe-file`
+symphonia = { version = "0.5", features = ["all"] }
+
+# Phase 1.5 — session/transcript id generation
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+assert_cmd = "2"
+predicates = "3"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Development profile. Fast compile (no LTO, many codegen units), but
+# opt-level=1 on our code so the binary is still usable — whisper
+# transcription and candle inference are unworkably slow at opt-level=0.
+# Dependencies are compiled at opt-level=3 unconditionally via the
+# [profile.dev.package."*"] override below, so the heavy C++/Rust
+# numeric code (whisper.cpp, candle tensor ops) isn't re-crippled.
+#
+# Use this for the inner dev loop:
+#   cargo build            # ~fast rebuild of our code, deps cached
+# For release bundling:
+#   cargo build --release  # slow, LTO, max perf
+[profile.dev]
+opt-level = 1
+debug = true
+lto = false
+codegen-units = 16
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# NOTE: Metal acceleration for whisper.cpp is temporarily disabled on
+# macOS. On macOS 26.3 + cmake 4.3.1 + Xcode 26.3, the `GGML_METAL=ON`
+# feature-detection TryCompile wedges indefinitely (zombie cmTC_*
+# processes, 0% CPU). Build without Metal for now so the rest of the
+# port can proceed; we'll re-enable once the TryCompile issue is
+# understood (candidates: downgrading cmake, pre-populating cmake cache,
+# vendoring whisper-rs-sys with GGML_METAL forced in the CMakeLists
+# rather than probed, or switching whisper-rs versions).
+#
+# [target.'cfg(target_os = "macos")'.dependencies]
+# whisper-rs = { version = "0.16", features = ["metal"] }
